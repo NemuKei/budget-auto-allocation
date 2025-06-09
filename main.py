@@ -144,6 +144,8 @@ def process(settings: Settings):
     monthly = pd.read_csv(INPUT_DIR / '月次予算.csv', encoding='utf-8-sig')
     daily = pd.read_csv(INPUT_DIR / '日別実績.csv', encoding='utf-8-sig')
 
+    max_guests = daily['人数'].max()
+
     numeric_cols_m = ['年', '月', '室数', '人数', '宿泊売上', '朝食売上', '料飲その他売上', 'その他売上', '総合計', '喫食数']
     for c in numeric_cols_m:
         monthly[c] = pd.to_numeric(monthly[c], errors='coerce')
@@ -179,14 +181,24 @@ def process(settings: Settings):
         df['宿泊売上'] = apply_distribution(dates, ratios, row['宿泊売上'], 100).values
         df['室数'] = apply_distribution(dates, ratios, row['室数'], 1).values
         df['人数'] = apply_distribution(dates, ratios, row['人数'], 1).values
+
+        # enforce capacity and historical guest maximums
+        df['室数'] = df['室数'].clip(upper=settings.capacity)
+        df['人数'] = df['人数'].clip(upper=max_guests)
         for c in ['宿泊売上', '室数', '人数']:
             if df[c].sum() == 0:
                 logging.warning('all zeros allocated for %s in %d-%02d', c, year, month)
 
         person_ratio = df['人数'] / df['人数'].sum() if df['人数'].sum() else 0
         breakfast_count = row['喫食数'] if not np.isnan(row['喫食数']) else row['朝食売上']/settings.breakfast_price
-        df['喫食数'] = adjust_to_total(person_ratio * breakfast_count, breakfast_count, 1)
-        df['朝食売上'] = adjust_to_total(df['喫食数'] * settings.breakfast_price, row['朝食売上'], 100)
+
+        # round counts to integer while keeping the monthly total
+        base_count = (person_ratio * breakfast_count).round()
+        df['喫食数'] = adjust_to_total(base_count, breakfast_count, 1).round().astype(int)
+
+        # breakfast revenue should also be integer (100 yen step)
+        base_revenue = (df['喫食数'] * settings.breakfast_price).round()
+        df['朝食売上'] = adjust_to_total(base_revenue, row['朝食売上'], 100).round().astype(int)
 
         fb_other = apply_distribution(dates, {('any','any'):1/len(dates)}, row['料飲その他売上'], 100)
         other = apply_distribution(dates, {('any','any'):1/len(dates)}, row['その他売上'], 100)
