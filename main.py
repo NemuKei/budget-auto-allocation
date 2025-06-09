@@ -230,7 +230,10 @@ def apply_distribution(dates, ratios, total, step):
     ratio_sum = sum(ratios.get(k, 0) for k in counts)
     missing = [k for k in counts if ratios.get(k, 0) == 0]
     if ratio_sum == 0 or len(missing) > len(counts) / 2:
+        logging.info("apply_distribution fallback to uniform distribution")
         ratios = {k: 1 / len(counts) for k in counts}
+    else:
+        logging.debug("apply_distribution using normal distribution")
 
     weights = np.array([
         ratios.get(k, 0) * day_weight(d, k) / counts.get(k, 1)
@@ -281,6 +284,9 @@ def process(settings: Settings):
     max_guests = daily['人数'].max()
     max_adr_hist = (daily['宿泊売上'] / daily['室数'].replace(0, np.nan)).max()
     max_revpar_hist = (daily['宿泊売上'] / settings.capacity).max()
+    max_daily_hist = daily['宿泊売上'].max()
+    daily_rev_cap = round(max_daily_hist * 1.05 / 100) * 100
+    logging.info("daily revenue cap set to %.0f", daily_rev_cap)
 
     numeric_cols_m = ['年', '月', '室数', '人数', '宿泊売上', '朝食売上', '料飲その他売上', 'その他売上', '総合計', '喫食数']
     for c in numeric_cols_m:
@@ -317,6 +323,31 @@ def process(settings: Settings):
         df['宿泊売上'] = apply_distribution(dates, ratios, row['宿泊売上'], 100).values
         df['室数'] = apply_distribution(dates, ratios, row['室数'], 1).values
         df['人数'] = apply_distribution(dates, ratios, row['人数'], 1).values
+
+        # ensure no zero allocations for key metrics
+        for col, step, total_val in [
+            ('宿泊売上', 100, row['宿泊売上']),
+            ('室数', 1, row['室数']),
+            ('人数', 1, row['人数']),
+        ]:
+            zeros = df[col] <= 0
+            if zeros.any():
+                logging.info('zero allocation adjusted for %s in %d-%02d', col, year, month)
+                min_val = step if df.loc[~zeros, col].empty else df.loc[~zeros, col].min()
+                df.loc[zeros, col] = min_val
+                df[col] = adjust_to_total(df[col], total_val, step)
+
+        # minimum revenue threshold based on historical lows
+        prev_min = daily.loc[mask_prev, '宿泊売上'].min()
+        recent_min = daily.loc[mask_recent, '宿泊売上'].min()
+        floor_candidates = [v for v in [prev_min, recent_min] if not np.isnan(v)]
+        if floor_candidates:
+            revenue_floor = np.floor(min(floor_candidates) * 0.9 / 100) * 100
+            before = df['宿泊売上'].copy()
+            df['宿泊売上'] = df['宿泊売上'].clip(lower=revenue_floor)
+            if not before.equals(df['宿泊売上']):
+                logging.info('revenue floor %.0f applied for %d-%02d', revenue_floor, year, month)
+            df['宿泊売上'] = adjust_to_total(df['宿泊売上'], row['宿泊売上'], 100)
 
         # enforce capacity and historical guest maximums
         df['室数'] = df['室数'].clip(upper=settings.capacity)
@@ -363,6 +394,9 @@ def process(settings: Settings):
                 logging.warning('RevPAR clipped on %s', r['date'])
             if r['宿泊売上'] == 0:
                 logging.warning('zero revenue on %s', r['date'])
+            if df.at[idx, '宿泊売上'] > daily_rev_cap:
+                df.at[idx, '宿泊売上'] = daily_rev_cap
+                logging.warning('daily revenue clipped to cap on %s', r['date'])
 
         df['総合計'] = df[['宿泊売上','朝食売上','料飲その他売上','その他売上']].sum(axis=1)
         total_diff = row['総合計'] - df['総合計'].sum()
