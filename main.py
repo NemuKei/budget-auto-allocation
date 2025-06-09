@@ -67,10 +67,15 @@ def day_key(date: datetime):
 
 def weekday_dist(df: pd.DataFrame, col: str) -> dict:
     """Return distribution ratio per (weekday, special) tuple."""
-    if df.empty or df[col].sum() == 0:
+    if df.empty:
+        logging.debug("weekday_dist: empty dataframe for %s", col)
+        return {}
+
+    df = df.copy()
+    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    if df[col].sum() == 0:
         logging.debug("weekday_dist: empty or zero data for %s", col)
         return {}
-    df = df.copy()
     df['key'] = df['date'].apply(day_key)
     grouped = df.groupby('key')[col].sum()
     total = grouped.sum()
@@ -93,17 +98,30 @@ def weighted_dist(dists, weights):
 
 
 def apply_distribution(dates, ratios, total, step):
+    """Distribute total to each date according to weekday/holiday ratios."""
     if not ratios:
-        return pd.Series([0]*len(dates), index=dates)
-    base = np.array([total * ratios.get(day_key(d), 0) for d in dates])
-    floor = (np.floor(base/step) * step)
+        return pd.Series([0] * len(dates), index=dates)
+
+    # count how many times each key appears in the target dates
+    keys = [day_key(d) for d in dates]
+    counts = {}
+    for k in keys:
+        counts[k] = counts.get(k, 0) + 1
+
+    base = np.array([
+        total * ratios.get(k, 0) / counts.get(k, 1)
+        for k in keys
+    ])
+
+    floor = np.floor(base / step) * step
     diff = total - floor.sum()
     order = np.argsort(base - floor)[::-1]
     i = 0
-    while abs(diff) >= step/2:
-        floor[order[i%len(order)]] += step if diff>0 else -step
-        diff += -step if diff>0 else step
+    while abs(diff) >= step / 2:
+        floor[order[i % len(order)]] += step if diff > 0 else -step
+        diff += -step if diff > 0 else step
         i += 1
+
     return pd.Series(floor, index=dates)
 
 
@@ -123,8 +141,17 @@ def adjust_to_total(series: pd.Series, target: float, step: int):
 
 
 def process(settings: Settings):
-    monthly = pd.read_csv(INPUT_DIR / '月次予算.csv')
-    daily = pd.read_csv(INPUT_DIR / '日別実績.csv')
+    monthly = pd.read_csv(INPUT_DIR / '月次予算.csv', encoding='utf-8-sig')
+    daily = pd.read_csv(INPUT_DIR / '日別実績.csv', encoding='utf-8-sig')
+
+    numeric_cols_m = ['年', '月', '室数', '人数', '宿泊売上', '朝食売上', '料飲その他売上', 'その他売上', '総合計', '喫食数']
+    for c in numeric_cols_m:
+        monthly[c] = pd.to_numeric(monthly[c], errors='coerce')
+
+    numeric_cols_d = ['室数', '人数', '宿泊売上', '喫食数']
+    for c in numeric_cols_d:
+        daily[c] = pd.to_numeric(daily[c], errors='coerce')
+
     daily['date'] = pd.to_datetime(daily['日付'], errors='coerce')
     daily = daily.dropna(subset=['date'])
 
@@ -146,11 +173,12 @@ def process(settings: Settings):
             weekday_dist(daily.loc[mask_recent], '宿泊売上'),
         ]
         ratios = weighted_dist(dists, [settings.weight_prev_year, settings.weight_2_3m, settings.weight_recent])
+        logging.debug("ratios %s", ratios)
         dates = pd.date_range(start, end)
         df = pd.DataFrame({'date': dates})
-        df['宿泊売上'] = apply_distribution(dates, ratios, row['宿泊売上'], 100)
-        df['室数'] = apply_distribution(dates, ratios, row['室数'], 1)
-        df['人数'] = apply_distribution(dates, ratios, row['人数'], 1)
+        df['宿泊売上'] = apply_distribution(dates, ratios, row['宿泊売上'], 100).values
+        df['室数'] = apply_distribution(dates, ratios, row['室数'], 1).values
+        df['人数'] = apply_distribution(dates, ratios, row['人数'], 1).values
         for c in ['宿泊売上', '室数', '人数']:
             if df[c].sum() == 0:
                 logging.warning('all zeros allocated for %s in %d-%02d', c, year, month)
