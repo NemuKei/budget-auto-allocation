@@ -104,16 +104,50 @@ def pre_holiday_boost(date: datetime) -> float:
     return 1.0
 
 
+def holiday_block_info(date: datetime):
+    """Return (index, length) if ``date`` is part of a consecutive holiday block."""
+    if not jpholiday.is_holiday(date):
+        return None
+    start = date
+    while jpholiday.is_holiday(start - timedelta(days=1)):
+        start -= timedelta(days=1)
+    length = 0
+    d = start
+    while jpholiday.is_holiday(d):
+        length += 1
+        d += timedelta(days=1)
+    if length < 2:
+        return None
+    index = (date - start).days + 1
+    return index, length
+
+
+def is_pre_block(date: datetime) -> bool:
+    """Return True if ``date`` is the day before a holiday block."""
+    return bool(
+        jpholiday.is_holiday(date + timedelta(days=1))
+        and jpholiday.is_holiday(date + timedelta(days=2))
+    )
+
+
+def day_type(date: datetime) -> str:
+    """Classify ``date`` into day types used for distribution."""
+    info = holiday_block_info(date)
+    if info:
+        index, _ = info
+        return f"holiday{index}"
+    if is_pre_block(date):
+        return "preholiday"
+    if jpholiday.is_holiday(date) and date.weekday() != 5:
+        return "holiday"
+    if is_pre_holiday(date):
+        return "pre"
+    return "normal"
+
+
 def day_key(date: datetime):
     """Return a tuple representing the weekday and day type."""
-    # Holidays that fall on Saturdays are treated as normal Saturdays.
-    if jpholiday.is_holiday(date) and date.weekday() != 5:
-        special = 'holiday'
-    elif is_pre_holiday(date):
-        special = 'pre'
-    else:
-        special = 'normal'
-    return (date.weekday(), special)
+    return (date.weekday(), day_type(date))
 
 
 def weekday_dist(df: pd.DataFrame, col: str) -> dict:
@@ -131,16 +165,15 @@ def weekday_dist(df: pd.DataFrame, col: str) -> dict:
     df['key'] = df['date'].apply(day_key)
     grouped = df.groupby('key')[col].sum()
 
-    keys = [(w, t) for w in range(7) for t in ('normal', 'pre', 'holiday')]
+    keys = set(grouped.index)
     base = 0.01  # smoothing factor so rare keys don't vanish
     dist = {k: grouped.get(k, 0.0) + base for k in keys}
 
-    # if a pre-holiday ratio is almost only the smoothing value, fall back to
-    # the normal weekday ratio for that weekday
+    # fall back for pre type when no data
     for w in range(7):
         pre_key = (w, 'pre')
         normal_key = (w, 'normal')
-        if dist[pre_key] <= base * 1.1:
+        if pre_key in dist and dist[pre_key] <= base * 1.1 and normal_key in dist:
             dist[pre_key] = dist.get(normal_key, base)
 
     total = sum(dist.values())
@@ -164,6 +197,24 @@ def weighted_dist(dists, weights):
     return result
 
 
+def day_weight(date: datetime, key) -> float:
+    """Return additional weight factor for the date based on day type."""
+    t = key[1]
+    if t == 'pre':
+        return pre_holiday_boost(date)
+    if t == 'preholiday':
+        return 1.0
+    if t.startswith('holiday'):
+        info = holiday_block_info(date)
+        if info:
+            index, length = info
+            w = 0.7 - 0.1 * (index - 1)
+            if index == length or w < 0.5:
+                w = 0.5
+            return w
+        return 0.7
+    return 1.0
+
 def apply_distribution(dates, ratios, total, step):
     """Distribute total to each date according to weekday/holiday ratios."""
     if not ratios:
@@ -182,9 +233,7 @@ def apply_distribution(dates, ratios, total, step):
         ratios = {k: 1 / len(counts) for k in counts}
 
     weights = np.array([
-        ratios.get(k, 0) * (
-            pre_holiday_boost(d) if k[1] == 'pre' else 1.0
-        ) / counts.get(k, 1)
+        ratios.get(k, 0) * day_weight(d, k) / counts.get(k, 1)
         for d, k in zip(dates, keys)
     ])
 
@@ -230,6 +279,8 @@ def process(settings: Settings):
     daily = pd.read_csv(INPUT_DIR / '日別実績.csv', encoding='utf-8-sig')
 
     max_guests = daily['人数'].max()
+    max_adr_hist = (daily['宿泊売上'] / daily['室数'].replace(0, np.nan)).max()
+    max_revpar_hist = (daily['宿泊売上'] / settings.capacity).max()
 
     numeric_cols_m = ['年', '月', '室数', '人数', '宿泊売上', '朝食売上', '料飲その他売上', 'その他売上', '総合計', '喫食数']
     for c in numeric_cols_m:
@@ -289,6 +340,29 @@ def process(settings: Settings):
         other = apply_distribution(dates, {('any','any'):1/len(dates)}, row['その他売上'], 100)
         df['料飲その他売上'] = fb_other.values
         df['その他売上'] = other.values
+
+        # metric validation
+        max_adr = max_adr_hist
+        max_revpar = max_revpar_hist
+        for idx, r in df.iterrows():
+            rooms = max(r['室数'], 1)
+            adr = r['宿泊売上'] / rooms
+            dor = r['人数'] / rooms
+            revpar = r['宿泊売上'] / settings.capacity
+            if adr > max_adr * 1.1:
+                df.at[idx, '宿泊売上'] = rooms * max_adr * 1.1
+                logging.warning('ADR clipped on %s', r['date'])
+            if dor > 2.5:
+                df.at[idx, '人数'] = rooms * 2.5
+                logging.warning('DOR high on %s', r['date'])
+            if dor < 1.0 and r['人数'] > 0:
+                df.at[idx, '人数'] = rooms * 1.0
+                logging.warning('DOR low on %s', r['date'])
+            if revpar > max_revpar * 1.1:
+                df.at[idx, '宿泊売上'] = settings.capacity * max_revpar * 1.1
+                logging.warning('RevPAR clipped on %s', r['date'])
+            if r['宿泊売上'] == 0:
+                logging.warning('zero revenue on %s', r['date'])
 
         df['総合計'] = df[['宿泊売上','朝食売上','料飲その他売上','その他売上']].sum(axis=1)
         total_diff = row['総合計'] - df['総合計'].sum()
