@@ -58,11 +58,11 @@ def save_settings(settings: Settings):
 def is_pre_holiday(date: datetime) -> bool:
     """Return True if ``date`` should be treated as a pre-holiday."""
     next_day = date + timedelta(days=1)
-    # Any day immediately before a holiday is considered pre-holiday.
-    # This naturally covers year-end (Dec 31 -> Jan 1) and 3-day weekends
-    # such as a Sunday before a Monday holiday.  "Saturday holidays" are
-    # ignored later when generating the day key.
-    return jpholiday.is_holiday(next_day)
+    # Treat a day as "pre-holiday" only when the following day is a holiday and
+    # the day itself is not Saturday.  This captures Sunday -> Monday (holiday)
+    # transitions while preventing Saturday from being tagged as a pre-holiday
+    # even if it precedes a holiday.
+    return date.weekday() != 5 and jpholiday.is_holiday(next_day)
 
 
 def day_key(date: datetime):
