@@ -56,20 +56,29 @@ def save_settings(settings: Settings):
 
 
 def is_pre_holiday(date: datetime) -> bool:
+    """Return True if ``date`` should be treated as a pre-holiday."""
     next_day = date + timedelta(days=1)
-    # Consider Mon-Thu as pre-holiday if the next day is a holiday.
-    # Also treat Sunday as pre-holiday when Monday is a holiday
-    weekday = date.weekday()
-    return ((weekday < 4) or (weekday == 6)) and jpholiday.is_holiday(next_day)
+    # Any day immediately before a holiday is considered pre-holiday.
+    # This naturally covers year-end (Dec 31 -> Jan 1) and 3-day weekends
+    # such as a Sunday before a Monday holiday.  "Saturday holidays" are
+    # ignored later when generating the day key.
+    return jpholiday.is_holiday(next_day)
 
 
 def day_key(date: datetime):
-    special = 'holiday' if jpholiday.is_holiday(date) else 'pre' if is_pre_holiday(date) else 'normal'
+    """Return a tuple representing the weekday and day type."""
+    # Holidays that fall on Saturdays are treated as normal Saturdays.
+    if jpholiday.is_holiday(date) and date.weekday() != 5:
+        special = 'holiday'
+    elif is_pre_holiday(date):
+        special = 'pre'
+    else:
+        special = 'normal'
     return (date.weekday(), special)
 
 
 def weekday_dist(df: pd.DataFrame, col: str) -> dict:
-    """Return distribution ratio per (weekday, special) tuple."""
+    """Return distribution ratio per (weekday, special) tuple with smoothing."""
     if df.empty:
         logging.debug("weekday_dist: empty dataframe for %s", col)
         return {}
@@ -79,12 +88,19 @@ def weekday_dist(df: pd.DataFrame, col: str) -> dict:
     if df[col].sum() == 0:
         logging.debug("weekday_dist: empty or zero data for %s", col)
         return {}
+
     df['key'] = df['date'].apply(day_key)
     grouped = df.groupby('key')[col].sum()
-    total = grouped.sum()
+
+    keys = [(w, t) for w in range(7) for t in ('normal', 'pre', 'holiday')]
+    base = 0.01  # smoothing factor so rare keys don't vanish
+    dist = {k: grouped.get(k, 0.0) + base for k in keys}
+    total = sum(dist.values())
     if total == 0:
-        return {}
-    dist = (grouped / total).to_dict()
+        # fallback to uniform distribution
+        return {k: 1/len(keys) for k in keys}
+    for k in dist:
+        dist[k] /= total
     return dist
 
 
@@ -111,10 +127,19 @@ def apply_distribution(dates, ratios, total, step):
     for k in keys:
         counts[k] = counts.get(k, 0) + 1
 
+    # check if ratios sufficiently cover the keys; otherwise fall back to uniform
+    ratio_sum = sum(ratios.get(k, 0) for k in counts)
+    missing = [k for k in counts if ratios.get(k, 0) == 0]
+    if ratio_sum == 0 or len(missing) > len(counts) / 2:
+        ratios = {k: 1 / len(counts) for k in counts}
+
     base = np.array([
         total * ratios.get(k, 0) / counts.get(k, 1)
         for k in keys
     ])
+
+    if base.sum() == 0:
+        base[:] = total / len(base)
 
     floor = np.floor(base / step) * step
     diff = total - floor.sum()
