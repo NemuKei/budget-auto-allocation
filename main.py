@@ -210,6 +210,13 @@ def process(settings: Settings):
         if abs(total_diff) >= 1:
             df.loc[df.index[-1],'その他売上'] += total_diff
             df.loc[df.index[-1],'総合計'] += total_diff
+
+        # add date related columns before computing the summary row
+        weekday_map = {0:'月', 1:'火', 2:'水', 3:'木', 4:'金', 5:'土', 6:'日'}
+        df['曜日'] = df['date'].dt.weekday.map(weekday_map)
+        df['祝日'] = df['date'].apply(lambda d: '祝' if pd.notnull(d) and jpholiday.is_holiday(d) else '')
+        df['date'] = df['date'].dt.strftime('%Y/%-m/%-d')
+
         df.loc['合計'] = df.sum(numeric_only=True)
         output_book[f'{year}-{month:02d}'] = df
     path = OUTPUT_DIR / f'日別予算_{settings.fiscal_year}.xlsx'
