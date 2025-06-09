@@ -56,13 +56,52 @@ def save_settings(settings: Settings):
 
 
 def is_pre_holiday(date: datetime) -> bool:
-    """Return True if ``date`` should be treated as a pre-holiday."""
-    next_day = date + timedelta(days=1)
-    # Treat a day as "pre-holiday" only when the following day is a holiday and
-    # the day itself is not Saturday.  This captures Sunday -> Monday (holiday)
-    # transitions while preventing Saturday from being tagged as a pre-holiday
-    # even if it precedes a holiday.
-    return date.weekday() != 5 and jpholiday.is_holiday(next_day)
+    """Return True if ``date`` should be treated as a pre-holiday.
+
+    A day is considered pre-holiday when any of the following conditions are met:
+    * The next day is a holiday.
+    * It is Saturday and the following Monday is a holiday (3 day weekend).
+    * The next day is a weekend/holiday and the day after that is a holiday
+      (handles longer blocks such as year-end or Golden Week).
+    """
+
+    # direct next day check
+    if jpholiday.is_holiday(date + timedelta(days=1)):
+        return True
+
+    # Saturday -> Monday holiday
+    if date.weekday() == 5 and jpholiday.is_holiday(date + timedelta(days=2)):
+        return True
+
+    # weekend/holiday bridge to a holiday within two days
+    if (
+        (date + timedelta(days=1)).weekday() >= 5
+        or jpholiday.is_holiday(date + timedelta(days=1))
+    ) and jpholiday.is_holiday(date + timedelta(days=2)):
+        return True
+
+    return False
+
+
+def pre_holiday_boost(date: datetime) -> float:
+    """Return weight boost factor for pre-holiday dates."""
+    if not is_pre_holiday(date):
+        return 1.0
+
+    # length of consecutive weekend/holiday days starting from this date
+    length = 1
+    d = date + timedelta(days=1)
+    while d.weekday() >= 5 or jpholiday.is_holiday(d):
+        length += 1
+        d += timedelta(days=1)
+    if length >= 3:
+        return 1.2
+
+    # Year-end/New Year boost
+    if (date.month == 12 and date.day >= 28) or (date.month == 1 and date.day <= 4):
+        return 1.2
+
+    return 1.0
 
 
 def day_key(date: datetime):
@@ -95,10 +134,19 @@ def weekday_dist(df: pd.DataFrame, col: str) -> dict:
     keys = [(w, t) for w in range(7) for t in ('normal', 'pre', 'holiday')]
     base = 0.01  # smoothing factor so rare keys don't vanish
     dist = {k: grouped.get(k, 0.0) + base for k in keys}
+
+    # if a pre-holiday ratio is almost only the smoothing value, fall back to
+    # the normal weekday ratio for that weekday
+    for w in range(7):
+        pre_key = (w, 'pre')
+        normal_key = (w, 'normal')
+        if dist[pre_key] <= base * 1.1:
+            dist[pre_key] = dist.get(normal_key, base)
+
     total = sum(dist.values())
     if total == 0:
         # fallback to uniform distribution
-        return {k: 1/len(keys) for k in keys}
+        return {k: 1 / len(keys) for k in keys}
     for k in dist:
         dist[k] /= total
     return dist
@@ -133,10 +181,19 @@ def apply_distribution(dates, ratios, total, step):
     if ratio_sum == 0 or len(missing) > len(counts) / 2:
         ratios = {k: 1 / len(counts) for k in counts}
 
-    base = np.array([
-        total * ratios.get(k, 0) / counts.get(k, 1)
-        for k in keys
+    weights = np.array([
+        ratios.get(k, 0) * (
+            pre_holiday_boost(d) if k[1] == 'pre' else 1.0
+        ) / counts.get(k, 1)
+        for d, k in zip(dates, keys)
     ])
+
+    if weights.sum() == 0:
+        weights[:] = 1 / len(weights)
+    else:
+        weights /= weights.sum()
+
+    base = total * weights
 
     if base.sum() == 0:
         base[:] = total / len(base)
