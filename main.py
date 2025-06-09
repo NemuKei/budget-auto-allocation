@@ -57,7 +57,10 @@ def save_settings(settings: Settings):
 
 def is_pre_holiday(date: datetime) -> bool:
     next_day = date + timedelta(days=1)
-    return date.weekday() < 4 and jpholiday.is_holiday(next_day)
+    # Consider Mon-Thu as pre-holiday if the next day is a holiday.
+    # Also treat Sunday as pre-holiday when Monday is a holiday
+    weekday = date.weekday()
+    return ((weekday < 4) or (weekday == 6)) and jpholiday.is_holiday(next_day)
 
 
 def day_key(date: datetime):
@@ -212,9 +215,12 @@ def process(settings: Settings):
             df.loc[df.index[-1],'総合計'] += total_diff
 
         # add date related columns before computing the summary row
-        weekday_map = {0:'月', 1:'火', 2:'水', 3:'木', 4:'金', 5:'土', 6:'日'}
+        weekday_map = {0: '月', 1: '火', 2: '水', 3: '木', 4: '金', 5: '土', 6: '日'}
         df['曜日'] = df['date'].dt.weekday.map(weekday_map)
-        df['祝日'] = df['date'].apply(lambda d: '祝' if pd.notnull(d) and jpholiday.is_holiday(d) else '')
+        df['祝日名'] = df['date'].apply(lambda d: jpholiday.is_holiday_name(d) or '')
+        # reorder so that date related columns appear right after date
+        col_order = ['date', '曜日', '祝日名'] + [c for c in df.columns if c not in ['date', '曜日', '祝日名']]
+        df = df[col_order]
         df['date'] = df['date'].dt.strftime('%Y/%-m/%-d')
 
         df.loc['合計'] = df.sum(numeric_only=True)
