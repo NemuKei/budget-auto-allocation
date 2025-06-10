@@ -222,20 +222,23 @@ def apply_distribution(dates, ratios, total, step):
     else:
         logging.debug("apply_distribution using normal distribution")
 
-    base_sat = ratios.get((5, 'normal'), 0)
+    # ensure Saturday acts as the anchor ratio among normal weekdays
+    normal_keys = [(i, 'normal') for i in range(7)]
+    max_normal = max((ratios.get(k, 0) for k in normal_keys), default=0)
+    base_sat = max(ratios.get((5, 'normal'), 0), max_normal)
 
     def single_ratio(date, key):
         dtype = day_type(date)
         info = holiday_block_info(date)
         # consecutive holiday/weekend block adjustment
         if info and info[1] >= 3:
-            idx, length = info
+            idx, _ = info
             if idx == 1:
-                return base_sat * 1.1
-            elif idx == length:
-                return base_sat * 0.6
-            else:
+                return base_sat * 1.05
+            elif idx == 2:
                 return base_sat * 0.9
+            else:
+                return base_sat * 0.85
         # pre-holiday dates share Saturday ratio
         if dtype in ('pre', 'preholiday'):
             return base_sat
@@ -303,6 +306,16 @@ def adjust_to_total_with_cap(series: pd.Series, target: float, step: int, cap: f
                 diff += step
         i += 1
         loops += 1
+    return base
+
+
+def uniform_allocation(dates, total, step):
+    """Return a uniform distribution series with residual on the last day."""
+    per_day = (total // step) // len(dates) * step
+    base = pd.Series(per_day, index=dates)
+    residual = total - base.sum()
+    if len(base) > 0:
+        base.iloc[-1] += residual
     return base
 
 
@@ -391,8 +404,21 @@ def process(settings: Settings):
                 logging.info('revenue floor %.0f applied for %d-%02d', revenue_floor, year, month)
             df['宿泊売上'] = adjust_to_total(df['宿泊売上'], row['宿泊売上'], 100)
 
-        # enforce guest maximums
-        df['人数'] = df['人数'].clip(upper=max_guests)
+        # guest count bounds based on history
+        guest_prev_max = daily.loc[mask_prev, '人数'].max()
+        guest_recent_max = daily.loc[mask_recent3, '人数'].max()
+        guest_prev_min = daily.loc[mask_prev, '人数'].min()
+        guest_recent_min = daily.loc[mask_recent3, '人数'].min()
+        upper_candidates = [v for v in [guest_prev_max, guest_recent_max] if not np.isnan(v)]
+        lower_candidates = [v for v in [guest_prev_min, guest_recent_min] if not np.isnan(v)]
+        guest_upper = max(upper_candidates) * 1.05 if upper_candidates else max_guests
+        guest_upper = min(guest_upper, max_guests)
+        guest_lower = min(lower_candidates) * 0.95 if lower_candidates else 0
+        before_guests = df['人数'].copy()
+        df['人数'] = df['人数'].clip(lower=guest_lower, upper=guest_upper)
+        if not before_guests.equals(df['人数']):
+            logging.warning('guest count clipped for %d-%02d', year, month)
+            df['人数'] = adjust_to_total(df['人数'], row['人数'], 1)
         for c in ['宿泊売上', '室数', '人数']:
             if df[c].sum() == 0:
                 logging.warning('all zeros allocated for %s in %d-%02d', c, year, month)
@@ -408,8 +434,8 @@ def process(settings: Settings):
         base_revenue = (df['喫食数'] * settings.breakfast_price).round()
         df['朝食売上'] = adjust_to_total(base_revenue, row['朝食売上'], 100).round().astype(int)
 
-        fb_other = apply_distribution(dates, {('any','any'):1/len(dates)}, row['料飲その他売上'], 100)
-        other = apply_distribution(dates, {('any','any'):1/len(dates)}, row['その他売上'], 100)
+        fb_other = uniform_allocation(dates, row['料飲その他売上'], 100)
+        other = uniform_allocation(dates, row['その他売上'], 100)
         df['料飲その他売上'] = fb_other.values
         df['その他売上'] = other.values
 
