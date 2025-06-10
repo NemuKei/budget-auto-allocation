@@ -589,10 +589,11 @@ def process(settings: Settings):
         r_total = summary.get('宿泊売上', 0)
         room_total = summary.get('室数', 0)
         guest_total = summary.get('人数', 0)
+        days = len(df)
         summary['ADR'] = round(r_total / room_total) if room_total else 0
         summary['DOR'] = round(guest_total / room_total, 2) if room_total else 0
-        summary['RevPAR'] = round(r_total / settings.capacity)
-        summary['OCC'] = round(room_total / settings.capacity, 2)
+        summary['RevPAR'] = round(r_total / (settings.capacity * days)) if days else 0
+        summary['OCC'] = round(room_total / (settings.capacity * days), 2) if days else 0
         df.loc['合計'] = summary
         output_book[f'{year}-{month:02d}'] = df
     path = OUTPUT_DIR / f'日別予算_{settings.fiscal_year}.xlsx'
