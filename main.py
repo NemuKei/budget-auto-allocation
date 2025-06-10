@@ -112,13 +112,12 @@ def holiday_block_info(date: datetime):
     while is_holiday_or_weekend(start - timedelta(days=1)):
         start -= timedelta(days=1)
 
-    length = 0
-    d = start
-    while is_holiday_or_weekend(d):
-        length += 1
-        d += timedelta(days=1)
+    end = date
+    while is_holiday_or_weekend(end + timedelta(days=1)):
+        end += timedelta(days=1)
 
-    if length < 3:
+    length = (end - start).days + 1
+    if length < 2:
         return None
 
     index = (date - start).days + 1
@@ -140,7 +139,9 @@ def day_type(date: datetime) -> str:
 
     info = holiday_block_info(date)
     if info:
-        index, _ = info
+        index, length = info
+        if index == length:
+            return "holiday_last"
         return f"holiday{index}"
     if is_pre_block(date):
         return "preholiday"
@@ -366,10 +367,24 @@ def allocate_from_ratios(dates, ratios, total, step):
 
 def compute_daily_ratios(dates, dist):
     """Return per-date ratios using ``dist`` keyed by ``day_key``."""
-    ratios = [
-        dist.get(day_key(d), dist.get((d.weekday(), "normal"), 0))
-        for d in dates
-    ]
+    def resolve(key):
+        if key in dist:
+            return dist[key]
+        weekday, dtype = key
+        if dtype == "holiday_last":
+            return dist.get((weekday, "normal"), 0) * 0.9
+        if dtype.startswith("holiday"):
+            try:
+                n = int(dtype[len("holiday"):])
+            except ValueError:
+                return dist.get((weekday, "normal"), 0)
+            if n == 1:
+                return dist.get((5, "normal"), dist.get((weekday, "normal"), 0))
+            prev = resolve((weekday, f"holiday{n-1}"))
+            return prev * 0.9
+        return dist.get((weekday, "normal"), 0)
+
+    ratios = [resolve(day_key(d)) for d in dates]
     return pd.Series(ratios, index=dates)
 
 
@@ -500,7 +515,9 @@ def process(settings: Settings):
 
             logging.debug("weekday ratios %s %s", m, ratios_month[m])
             for wd, rt in ratios_month[m].items():
-                ratio_rows.append({'年': year, '月': month, '曜日': wd, '項目': m, '係数': rt})
+                ratio_rows.append({'年': year, '月': month, '曜日': wd, 'タイプ': 'weekday_ratio', '項目': m, '係数': rt})
+            for (wd, dtype), val in dists_month[m].items():
+                ratio_rows.append({'年': year, '月': month, '曜日': wd, 'タイプ': dtype, '項目': m, '係数': val})
 
         dates = pd.date_range(start, end)
         df = pd.DataFrame({'date': dates})
