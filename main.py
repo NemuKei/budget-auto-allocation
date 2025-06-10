@@ -261,13 +261,17 @@ def adjust_to_total(series: pd.Series, target: float, step: int):
         raise ValueError('series contains invalid value')
     base = series.copy().astype(float)
     diff = target - base.sum()
-    order = np.argsort(base - np.floor(base/step)*step)[::-1]
+    order = np.argsort(base - np.floor(base/step)*step)[::-1].to_numpy()
+    rng = np.random.default_rng()
+    rng.shuffle(order)
     i = 0
     while abs(diff) >= step/2:
-        idx = series.index[order[i%len(order)]]
-        base[idx] += step if diff>0 else -step
-        diff += -step if diff>0 else step
+        idx = series.index[order[i % len(order)]]
+        base[idx] += step if diff > 0 else -step
+        diff += -step if diff > 0 else step
         i += 1
+        if i % len(order) == 0:
+            rng.shuffle(order)
     return base
 
 
@@ -275,7 +279,9 @@ def adjust_to_total_with_cap(series: pd.Series, target: float, step: int, cap: f
     """Adjust series to match target without exceeding ``cap`` per element."""
     base = series.copy().astype(float)
     diff = target - base.sum()
-    order = np.argsort(base - np.floor(base/step)*step)[::-1]
+    order = np.argsort(base - np.floor(base/step)*step)[::-1].to_numpy()
+    rng = np.random.default_rng()
+    rng.shuffle(order)
     caps = np.full(len(base), cap)
     i = 0
     loops = 0
@@ -291,6 +297,8 @@ def adjust_to_total_with_cap(series: pd.Series, target: float, step: int, cap: f
                 diff += step
         i += 1
         loops += 1
+        if i % len(order) == 0:
+            rng.shuffle(order)
     return base
 
 
@@ -422,6 +430,7 @@ def process(settings: Settings):
 
     year_start = datetime(settings.fiscal_year, 6, 1)
     output_book = {}
+    ratio_rows = []
 
     latest_date = daily['date'].max()
     recent_start = latest_date - pd.DateOffset(days=30)
@@ -499,6 +508,8 @@ def process(settings: Settings):
             logging.info("distribution weights for %d-%02d: %s", year, month, weight_info)
 
         logging.debug("weekday ratios %s", weekday_ratios)
+        for wd, rt in weekday_ratios.items():
+            ratio_rows.append({'年': year, '月': month, '曜日': wd, '係数': rt})
         dates = pd.date_range(start, end)
         df = pd.DataFrame({'date': dates})
         daily_ratios = compute_daily_ratios(dates, weekday_ratios)
@@ -526,11 +537,12 @@ def process(settings: Settings):
         valid_vals = [v for v in [max_prev, max_recent] if not np.isnan(v)]
         room_upper_bound = max(valid_vals) if valid_vals else settings.capacity
         room_upper_bound = min(room_upper_bound, settings.capacity)
-        before_rooms = df['室数'].copy()
+        before_sum = df['室数'].sum()
         df['室数'] = df['室数'].clip(upper=room_upper_bound)
-        if not before_rooms.equals(df['室数']):
+        if not np.isclose(before_sum, df['室数'].sum()):
             logging.warning('room count clipped for %d-%02d', year, month)
-            df['室数'] = adjust_to_total(df['室数'], row['室数'], 1)
+        df['室数'] = adjust_to_total_with_cap(df['室数'], row['室数'], 1, room_upper_bound)
+        df['室数'] = adjust_to_total(df['室数'], row['室数'], 1)
 
         # minimum revenue threshold based on historical lows
         prev_min = daily.loc[mask_prev, '宿泊売上'].min()
@@ -621,7 +633,8 @@ def process(settings: Settings):
             if col == '人数':
                 df[col] = adjust_to_total_with_cap(df[col], total_val, step, guest_upper).round().astype(int)
             elif col == '室数':
-                df[col] = adjust_to_total_with_cap(df[col], total_val, step, room_upper_bound).round().astype(int)
+                df[col] = adjust_to_total_with_cap(df[col], total_val, step, room_upper_bound)
+                df[col] = adjust_to_total(df[col], total_val, step).round().astype(int)
             else:
                 df[col] = adjust_to_total(df[col], total_val, step)
 
@@ -630,7 +643,9 @@ def process(settings: Settings):
         occ_before = df['室数'] / settings.capacity
         df['室数'] = df['室数'].clip(upper=cap_val)
         df['室数'] = adjust_to_total_with_cap(df['室数'], row['室数'], 1, cap_val)
+        df['室数'] = adjust_to_total(df['室数'], row['室数'], 1)
         df['人数'] = adjust_to_total_with_cap(df['人数'], row['人数'], 1, guest_upper)
+        df['人数'] = adjust_to_total(df['人数'], row['人数'], 1)
         occ_after = df['室数'] / settings.capacity
         deviation = (occ_after - occ_before).abs() / occ_before.replace(0, np.nan)
         for idx in df.index[deviation > 0.1]:
@@ -674,6 +689,8 @@ def process(settings: Settings):
     with pd.ExcelWriter(path) as writer:
         for name, data in output_book.items():
             data.to_excel(writer, sheet_name=name, index=False)
+        if ratio_rows:
+            pd.DataFrame(ratio_rows).to_excel(writer, sheet_name='係数', index=False)
     logging.info("saved output to %s", path)
 
 
