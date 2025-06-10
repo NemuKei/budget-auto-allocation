@@ -304,6 +304,100 @@ def uniform_allocation(dates, total, step):
     return base
 
 
+def weekday_ratio(df: pd.DataFrame, col: str) -> dict:
+    """Return weekday ratio = weekday average / overall average."""
+    if df.empty:
+        return {i: 1.0 for i in range(7)}
+
+    df = df.copy()
+    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    df['weekday'] = df['date'].dt.weekday
+    overall = df[col].mean() or 1.0
+
+    ratios = {}
+    for i in range(7):
+        vals = df.loc[df['weekday'] == i, col]
+        ratios[i] = (vals.mean() / overall) if not vals.empty else 1.0
+    return ratios
+
+
+def blend_weekday_ratios(ratios_list, weights):
+    """Blend multiple weekday ratio tables with weights."""
+    result = {i: 0.0 for i in range(7)}
+    total = sum(weights)
+    if total == 0:
+        return {i: 1.0 for i in range(7)}
+    for r, w in zip(ratios_list, weights):
+        for i in range(7):
+            result[i] += r.get(i, 1.0) * w
+    for i in result:
+        result[i] /= total
+    return result
+
+
+def allocate_from_ratios(dates, ratios, total, step):
+    """Allocate ``total`` across ``dates`` using precomputed ``ratios`` array."""
+    weights = np.array(ratios)
+    if weights.sum() == 0:
+        weights[:] = 1 / len(weights)
+    else:
+        weights /= weights.sum()
+
+    base = total * weights
+    floor = np.floor(base / step) * step
+    diff = total - floor.sum()
+    order = np.argsort(base - floor)[::-1]
+    i = 0
+    while abs(diff) >= step / 2:
+        floor[order[i % len(order)]] += step if diff > 0 else -step
+        diff += -step if diff > 0 else step
+        i += 1
+
+    return pd.Series(floor, index=dates)
+
+
+def compute_daily_ratios(dates, weekday_ratios):
+    """Return daily ratio series with holiday adjustments."""
+    ratios = [weekday_ratios.get(d.weekday(), 1.0) for d in dates]
+
+    # pre-holiday days use Saturday ratio
+    for i in range(len(dates) - 1):
+        if not is_holiday_or_weekend(dates[i]) and is_holiday_or_weekend(dates[i + 1]):
+            ratios[i] = weekday_ratios.get(5, 1.0)
+
+    # consecutive holiday blocks
+    i = 0
+    while i < len(dates):
+        if is_holiday_or_weekend(dates[i]):
+            prev = weekday_ratios.get(5, 1.0)
+            ratios[i] = prev
+            j = i + 1
+            while j < len(dates) and is_holiday_or_weekend(dates[j]):
+                prev *= 0.9
+                ratios[j] = prev
+                j += 1
+            if j < len(dates) and not is_holiday_or_weekend(dates[j]):
+                ratios[j] = weekday_ratios.get(dates[j].weekday(), 1.0) * 0.9
+            i = j
+        else:
+            i += 1
+
+    # New Year special handling
+    for idx, d in enumerate(dates):
+        if d.month == 12 and d.day == 31:
+            ratios[idx] = weekday_ratios.get(5, 1.0)
+            base = ratios[idx]
+            if idx + 1 < len(dates) and dates[idx + 1].month == 1 and dates[idx + 1].day == 1:
+                ratios[idx + 1] = base * 0.9
+                base = ratios[idx + 1]
+                if idx + 2 < len(dates) and dates[idx + 2].month == 1 and dates[idx + 2].day == 2:
+                    ratios[idx + 2] = base * 0.8
+                    base = ratios[idx + 2]
+                    if idx + 3 < len(dates) and dates[idx + 3].month == 1 and dates[idx + 3].day == 3:
+                        ratios[idx + 3] = base * 0.8
+    return pd.Series(ratios, index=dates)
+
+
 def process(settings: Settings):
     monthly = pd.read_csv(INPUT_DIR / '月次予算.csv', encoding='utf-8-sig')
     daily = pd.read_csv(INPUT_DIR / '日別実績.csv', encoding='utf-8-sig')
@@ -333,12 +427,12 @@ def process(settings: Settings):
     recent_start = latest_date - pd.DateOffset(days=30)
     recent_end = latest_date - pd.DateOffset(days=1)
     range_recent_mask = (daily['date'] >= recent_start) & (daily['date'] <= recent_end)
-    dist_recent_base = weekday_dist(daily.loc[range_recent_mask], '宿泊売上')
+    ratio_recent_base = weekday_ratio(daily.loc[range_recent_mask], '宿泊売上')
 
     range_23_start = latest_date - pd.DateOffset(days=90)
     range_23_end = latest_date - pd.DateOffset(days=30)
     range_23_mask = (daily['date'] >= range_23_start) & (daily['date'] < range_23_end)
-    dist_23_base = weekday_dist(daily.loc[range_23_mask], '宿泊売上')
+    ratio_23_base = weekday_ratio(daily.loc[range_23_mask], '宿泊売上')
 
     logging.info(
         "weekday dist base ranges recent=%s to %s, 2-3m=%s to %s",
@@ -358,10 +452,10 @@ def process(settings: Settings):
         mask_prev1 = (daily['date'] >= prev_start1) & (daily['date'] <= prev_end1)
         mask_prev2 = pd.Series(False, index=daily.index)
 
-        dist_prev = {}
+        ratio_prev = {}
         prev_label = None
         if not daily.loc[mask_prev1].empty:
-            dist_prev = weekday_dist(daily.loc[mask_prev1], '宿泊売上')
+            ratio_prev = weekday_ratio(daily.loc[mask_prev1], '宿泊売上')
             prev_label = f"{prev_start1.date()} to {prev_end1.date()}"
             logging.info("same month last year used for %d-%02d: %s", year, month, prev_label)
         else:
@@ -369,7 +463,7 @@ def process(settings: Settings):
             prev_end2 = end - pd.DateOffset(years=2)
             mask_prev2 = (daily['date'] >= prev_start2) & (daily['date'] <= prev_end2)
             if not daily.loc[mask_prev2].empty:
-                dist_prev = weekday_dist(daily.loc[mask_prev2], '宿泊売上')
+                ratio_prev = weekday_ratio(daily.loc[mask_prev2], '宿泊売上')
                 prev_label = f"{prev_start2.date()} to {prev_end2.date()} (2y)"
                 logging.info("same month fallback 2yrs for %d-%02d: %s", year, month, prev_label)
             else:
@@ -378,38 +472,39 @@ def process(settings: Settings):
         mask_prev = mask_prev1 if not daily.loc[mask_prev1].empty else mask_prev2
         mask_recent = (daily['date'] >= start - pd.DateOffset(days=30)) & (daily['date'] < start)
 
-        dists = []
+        ratios_list = []
         weights = []
         labels = []
-        if dist_prev:
-            dists.append(dist_prev)
+        if ratio_prev:
+            ratios_list.append(ratio_prev)
             weights.append(settings.weight_prev_year)
             labels.append('prev')
-        if dist_23_base:
-            dists.append(dist_23_base)
+        if ratio_23_base:
+            ratios_list.append(ratio_23_base)
             weights.append(settings.weight_2_3m)
             labels.append('2-3m')
-        if dist_recent_base:
-            dists.append(dist_recent_base)
+        if ratio_recent_base:
+            ratios_list.append(ratio_recent_base)
             weights.append(settings.weight_recent)
             labels.append('recent')
 
         if not weights:
-            ratios = {}
+            weekday_ratios = {i: 1.0 for i in range(7)}
             logging.warning("no historical data for weekday distribution %d-%02d", year, month)
         else:
             total_w = sum(weights)
             weights = [w / total_w for w in weights]
-            ratios = weighted_dist(dists, weights)
+            weekday_ratios = blend_weekday_ratios(ratios_list, weights)
             weight_info = {l: round(w, 3) for l, w in zip(labels, weights)}
             logging.info("distribution weights for %d-%02d: %s", year, month, weight_info)
 
-        logging.debug("ratios %s", ratios)
+        logging.debug("weekday ratios %s", weekday_ratios)
         dates = pd.date_range(start, end)
         df = pd.DataFrame({'date': dates})
-        df['宿泊売上'] = apply_distribution(dates, ratios, row['宿泊売上'], 100).values
-        df['室数'] = apply_distribution(dates, ratios, row['室数'], 1).values
-        df['人数'] = apply_distribution(dates, ratios, row['人数'], 1).values
+        daily_ratios = compute_daily_ratios(dates, weekday_ratios)
+        df['宿泊売上'] = allocate_from_ratios(dates, daily_ratios.values, row['宿泊売上'], 100).values
+        df['室数'] = allocate_from_ratios(dates, daily_ratios.values, row['室数'], 1).values
+        df['人数'] = allocate_from_ratios(dates, daily_ratios.values, row['人数'], 1).values
 
         # ensure no zero allocations for key metrics
         for col, step, total_val in [
