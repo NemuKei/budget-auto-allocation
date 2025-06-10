@@ -84,50 +84,50 @@ def is_pre_holiday(date: datetime) -> bool:
 
 
 def pre_holiday_boost(date: datetime) -> float:
-    """Return weight boost factor for pre-holiday dates."""
-    if not is_pre_holiday(date):
-        return 1.0
+    """Return weight boost factor for pre-holiday dates.
 
-    # length of consecutive weekend/holiday days starting from this date
-    length = 1
-    d = date + timedelta(days=1)
-    while d.weekday() >= 5 or jpholiday.is_holiday(d):
-        length += 1
-        d += timedelta(days=1)
-    if length >= 3:
-        return 1.2
-
-    # Year-end/New Year boost
-    if (date.month == 12 and date.day >= 28) or (date.month == 1 and date.day <= 4):
-        return 1.2
-
+    Previous versions applied additional smoothing based on surrounding
+    holidays.  The new specification treats pre-holidays the same as
+    Saturdays, so no extra boost is applied.
+    """
     return 1.0
 
 
+def is_holiday_or_weekend(d: datetime) -> bool:
+    """Return True if ``d`` is a weekend or a holiday."""
+    return d.weekday() >= 5 or jpholiday.is_holiday(d)
+
+
 def holiday_block_info(date: datetime):
-    """Return (index, length) if ``date`` is part of a consecutive holiday block."""
-    if not jpholiday.is_holiday(date):
+    """Return (index, length) if ``date`` belongs to a holiday/weekend block.
+
+    A block is a consecutive stretch of holiday/weekend days of length three or
+    more.  Adjacent weekends around long holidays are included in the block.
+    """
+
+    if not is_holiday_or_weekend(date):
         return None
+
     start = date
-    while jpholiday.is_holiday(start - timedelta(days=1)):
+    while is_holiday_or_weekend(start - timedelta(days=1)):
         start -= timedelta(days=1)
+
     length = 0
     d = start
-    while jpholiday.is_holiday(d):
+    while is_holiday_or_weekend(d):
         length += 1
         d += timedelta(days=1)
-    if length < 2:
+
+    if length < 3:
         return None
+
     index = (date - start).days + 1
     return index, length
 
 
 def is_pre_block(date: datetime) -> bool:
-    """Return True if ``date`` is the day before a holiday block."""
-    return bool(
-        jpholiday.is_holiday(date + timedelta(days=1))
-        and jpholiday.is_holiday(date + timedelta(days=2))
-    )
+    """Return True if ``date`` is the day before a long holiday/weekend block."""
+    return holiday_block_info(date + timedelta(days=1)) is not None
 
 
 def day_type(date: datetime) -> str:
@@ -146,8 +146,12 @@ def day_type(date: datetime) -> str:
 
 
 def day_key(date: datetime):
-    """Return a tuple representing the weekday and day type."""
-    return (date.weekday(), day_type(date))
+    """Return a tuple representing the weekday and day type used for ratios."""
+    dtype = day_type(date)
+    # Pre-holiday dates share the Saturday coefficient for distribution
+    if dtype in ('pre', 'preholiday'):
+        return (5, 'normal')
+    return (date.weekday(), dtype)
 
 
 def weekday_dist(df: pd.DataFrame, col: str) -> dict:
@@ -168,13 +172,6 @@ def weekday_dist(df: pd.DataFrame, col: str) -> dict:
     keys = set(grouped.index)
     base = 0.01  # smoothing factor so rare keys don't vanish
     dist = {k: grouped.get(k, 0.0) + base for k in keys}
-
-    # fall back for pre type when no data
-    for w in range(7):
-        pre_key = (w, 'pre')
-        normal_key = (w, 'normal')
-        if pre_key in dist and dist[pre_key] <= base * 1.1 and normal_key in dist:
-            dist[pre_key] = dist.get(normal_key, base)
 
     total = sum(dist.values())
     if total == 0:
@@ -198,21 +195,11 @@ def weighted_dist(dists, weights):
 
 
 def day_weight(date: datetime, key) -> float:
-    """Return additional weight factor for the date based on day type."""
-    t = key[1]
-    if t == 'pre':
-        return pre_holiday_boost(date)
-    if t == 'preholiday':
-        return 1.0
-    if t.startswith('holiday'):
-        info = holiday_block_info(date)
-        if info:
-            index, length = info
-            w = 0.7 - 0.1 * (index - 1)
-            if index == length or w < 0.5:
-                w = 0.5
-            return w
-        return 0.7
+    """Return additional weight factor for the date.
+
+    The new rules do not apply smoothing based on day type here; all
+    adjustments are handled in ``apply_distribution``.
+    """
     return 1.0
 
 def apply_distribution(dates, ratios, total, step):
@@ -235,8 +222,27 @@ def apply_distribution(dates, ratios, total, step):
     else:
         logging.debug("apply_distribution using normal distribution")
 
+    base_sat = ratios.get((5, 'normal'), 0)
+
+    def single_ratio(date, key):
+        dtype = day_type(date)
+        info = holiday_block_info(date)
+        # consecutive holiday/weekend block adjustment
+        if info and info[1] >= 3:
+            idx, length = info
+            if idx == 1:
+                return base_sat * 1.1
+            elif idx == length:
+                return base_sat * 0.6
+            else:
+                return base_sat * 0.9
+        # pre-holiday dates share Saturday ratio
+        if dtype in ('pre', 'preholiday'):
+            return base_sat
+        return ratios.get(key, 0)
+
     weights = np.array([
-        ratios.get(k, 0) * day_weight(d, k) / counts.get(k, 1)
+        single_ratio(d, k) * day_weight(d, k) / counts.get(k, 1)
         for d, k in zip(dates, keys)
     ])
 
