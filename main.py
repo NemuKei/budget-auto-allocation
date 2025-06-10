@@ -173,12 +173,22 @@ def weekday_dist(df: pd.DataFrame, col: str) -> dict:
     base = 0.01  # smoothing factor so rare keys don't vanish
     dist = {k: grouped.get(k, 0.0) + base for k in keys}
 
+    # blend with uniform distribution when history is sparse
+    if len(df) < 30 or len(keys) < 5:
+        uniform = {k: 1 / len(keys) for k in keys}
+        for k in dist:
+            dist[k] = dist[k] * 0.7 + uniform[k] * 0.3
+
     total = sum(dist.values())
     if total == 0:
         # fallback to uniform distribution
         return {k: 1 / len(keys) for k in keys}
     for k in dist:
         dist[k] /= total
+
+    if max(dist.values()) - min(dist.values()) < 0.05:
+        logging.warning("weekday_dist ratios nearly uniform for %s", col)
+
     return dist
 
 
@@ -253,6 +263,11 @@ def apply_distribution(dates, ratios, total, step):
         weights[:] = 1 / len(weights)
     else:
         weights /= weights.sum()
+
+    logging.debug(
+        "apply_distribution weights stats min=%.4f max=%.4f mean=%.4f",
+        weights.min(), weights.max(), weights.mean(),
+    )
 
     base = total * weights
 
@@ -476,9 +491,10 @@ def process(settings: Settings):
         guest_lower = min(lower_candidates) * 0.95 if lower_candidates else 0
         before_guests = df['人数'].copy()
         df['人数'] = df['人数'].clip(lower=guest_lower, upper=guest_upper)
+        df['人数'] = adjust_to_total_with_cap(df['人数'], row['人数'], 1, guest_upper)
         if not before_guests.equals(df['人数']):
             logging.warning('guest count clipped for %d-%02d', year, month)
-            df['人数'] = adjust_to_total(df['人数'], row['人数'], 1)
+        df['人数'] = df['人数'].round().astype(int)
         for c in ['宿泊売上', '室数', '人数']:
             if df[c].sum() == 0:
                 logging.warning('all zeros allocated for %s in %d-%02d', c, year, month)
@@ -531,7 +547,10 @@ def process(settings: Settings):
             ('室数', 1, row['室数']),
             ('人数', 1, row['人数']),
         ]:
-            df[col] = adjust_to_total(df[col], total_val, step)
+            if col == '人数':
+                df[col] = adjust_to_total_with_cap(df[col], total_val, step, guest_upper).round().astype(int)
+            else:
+                df[col] = adjust_to_total(df[col], total_val, step)
 
         # occupancy cap handling
         cap_val = min(room_upper_bound, settings.capacity)
