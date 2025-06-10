@@ -283,6 +283,29 @@ def adjust_to_total(series: pd.Series, target: float, step: int):
     return base
 
 
+def adjust_to_total_with_cap(series: pd.Series, target: float, step: int, cap: float):
+    """Adjust series to match target without exceeding ``cap`` per element."""
+    base = series.copy().astype(float)
+    diff = target - base.sum()
+    order = np.argsort(base - np.floor(base/step)*step)[::-1]
+    caps = np.full(len(base), cap)
+    i = 0
+    loops = 0
+    while abs(diff) >= step/2 and loops < len(order) * 10:
+        idx = series.index[order[i % len(order)]]
+        if diff > 0:
+            if base[idx] + step <= caps[order[i % len(order)]]:
+                base[idx] += step
+                diff -= step
+        else:
+            if base[idx] - step >= 0:
+                base[idx] -= step
+                diff += step
+        i += 1
+        loops += 1
+    return base
+
+
 def process(settings: Settings):
     monthly = pd.read_csv(INPUT_DIR / '月次予算.csv', encoding='utf-8-sig')
     daily = pd.read_csv(INPUT_DIR / '日別実績.csv', encoding='utf-8-sig')
@@ -424,6 +447,16 @@ def process(settings: Settings):
         ]:
             df[col] = adjust_to_total(df[col], total_val, step)
 
+        # occupancy cap handling
+        cap_val = min(room_upper_bound, settings.capacity)
+        occ_before = df['室数'] / settings.capacity
+        df['室数'] = df['室数'].clip(upper=cap_val)
+        df['室数'] = adjust_to_total_with_cap(df['室数'], row['室数'], 1, cap_val)
+        occ_after = df['室数'] / settings.capacity
+        deviation = (occ_after - occ_before).abs() / occ_before.replace(0, np.nan)
+        for idx in df.index[deviation > 0.1]:
+            logging.warning('OCC clipped >10%% on %s', df.at[idx, 'date'])
+
         df['総合計'] = df[['宿泊売上','朝食売上','料飲その他売上','その他売上']].sum(axis=1)
         total_diff = row['総合計'] - df['総合計'].sum()
         if abs(total_diff) >= 1:
@@ -432,10 +465,10 @@ def process(settings: Settings):
 
         # KPI calculations
         rooms_safe = np.where(df['室数'] == 0, 1, df['室数'])
-        df['ADR'] = (df['宿泊売上'] / rooms_safe).round(2)
+        df['ADR'] = (df['宿泊売上'] / rooms_safe).round().astype(int)
         df['DOR'] = (df['人数'] / rooms_safe).round(2)
-        df['RevPAR'] = (df['宿泊売上'] / settings.capacity).round(2)
-        df['OCC'] = (df['室数'] / settings.capacity).round(2)
+        df['RevPAR'] = (df['宿泊売上'] / settings.capacity).round().astype(int)
+        df['OCC'] = np.minimum(df['室数'] / settings.capacity, 1.0).round(2)
 
         # add date related columns before computing the summary row
         weekday_map = {0: '月', 1: '火', 2: '水', 3: '木', 4: '金', 5: '土', 6: '日'}
@@ -447,7 +480,15 @@ def process(settings: Settings):
         df = df[col_order]
         df['date'] = df['date'].dt.strftime('%Y/%-m/%-d')
 
-        df.loc['合計'] = df.sum(numeric_only=True)
+        summary = df.sum(numeric_only=True)
+        r_total = summary.get('宿泊売上', 0)
+        room_total = summary.get('室数', 0)
+        guest_total = summary.get('人数', 0)
+        summary['ADR'] = round(r_total / room_total) if room_total else 0
+        summary['DOR'] = round(guest_total / room_total, 2) if room_total else 0
+        summary['RevPAR'] = round(r_total / settings.capacity)
+        summary['OCC'] = round(room_total / settings.capacity, 2)
+        df.loc['合計'] = summary
         output_book[f'{year}-{month:02d}'] = df
     path = OUTPUT_DIR / f'日別予算_{settings.fiscal_year}.xlsx'
     with pd.ExcelWriter(path) as writer:
