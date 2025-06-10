@@ -343,6 +343,19 @@ def process(settings: Settings):
                 df.loc[zeros, col] = min_val
                 df[col] = adjust_to_total(df[col], total_val, step)
 
+        # dynamic room upper bound based on history
+        mask_recent3 = (daily['date'] >= start - pd.DateOffset(months=3)) & (daily['date'] < start)
+        max_prev = daily.loc[mask_prev, '室数'].max()
+        max_recent = daily.loc[mask_recent3, '室数'].max()
+        valid_vals = [v for v in [max_prev, max_recent] if not np.isnan(v)]
+        room_upper_bound = max(valid_vals) if valid_vals else settings.capacity
+        room_upper_bound = min(room_upper_bound, settings.capacity)
+        before_rooms = df['室数'].copy()
+        df['室数'] = df['室数'].clip(upper=room_upper_bound)
+        if not before_rooms.equals(df['室数']):
+            logging.warning('room count clipped for %d-%02d', year, month)
+            df['室数'] = adjust_to_total(df['室数'], row['室数'], 1)
+
         # minimum revenue threshold based on historical lows
         prev_min = daily.loc[mask_prev, '宿泊売上'].min()
         recent_min = daily.loc[mask_recent, '宿泊売上'].min()
@@ -355,8 +368,7 @@ def process(settings: Settings):
                 logging.info('revenue floor %.0f applied for %d-%02d', revenue_floor, year, month)
             df['宿泊売上'] = adjust_to_total(df['宿泊売上'], row['宿泊売上'], 100)
 
-        # enforce capacity and historical guest maximums
-        df['室数'] = df['室数'].clip(upper=settings.capacity)
+        # enforce guest maximums
         df['人数'] = df['人数'].clip(upper=max_guests)
         for c in ['宿泊売上', '室数', '人数']:
             if df[c].sum() == 0:
@@ -404,18 +416,34 @@ def process(settings: Settings):
                 df.at[idx, '宿泊売上'] = daily_rev_cap
                 logging.warning('daily revenue clipped to cap on %s', r['date'])
 
+        # ensure monthly totals match budget after all adjustments
+        for col, step, total_val in [
+            ('宿泊売上', 100, row['宿泊売上']),
+            ('室数', 1, row['室数']),
+            ('人数', 1, row['人数']),
+        ]:
+            df[col] = adjust_to_total(df[col], total_val, step)
+
         df['総合計'] = df[['宿泊売上','朝食売上','料飲その他売上','その他売上']].sum(axis=1)
         total_diff = row['総合計'] - df['総合計'].sum()
         if abs(total_diff) >= 1:
             df.loc[df.index[-1],'その他売上'] += total_diff
             df.loc[df.index[-1],'総合計'] += total_diff
 
+        # KPI calculations
+        rooms_safe = np.where(df['室数'] == 0, 1, df['室数'])
+        df['ADR'] = (df['宿泊売上'] / rooms_safe).round(2)
+        df['DOR'] = (df['人数'] / rooms_safe).round(2)
+        df['RevPAR'] = (df['宿泊売上'] / settings.capacity).round(2)
+        df['OCC'] = (df['室数'] / settings.capacity).round(2)
+
         # add date related columns before computing the summary row
         weekday_map = {0: '月', 1: '火', 2: '水', 3: '木', 4: '金', 5: '土', 6: '日'}
         df['曜日'] = df['date'].dt.weekday.map(weekday_map)
         df['祝日名'] = df['date'].apply(lambda d: jpholiday.is_holiday_name(d) or '')
-        # reorder so that date related columns appear right after date
-        col_order = ['date', '曜日', '祝日名'] + [c for c in df.columns if c not in ['date', '曜日', '祝日名']]
+        # reorder so that date related columns appear right after date and KPIs at the end
+        kpi_cols = ['ADR', 'DOR', 'RevPAR', 'OCC']
+        col_order = ['date', '曜日', '祝日名'] + [c for c in df.columns if c not in ['date', '曜日', '祝日名'] + kpi_cols] + kpi_cols
         df = df[col_order]
         df['date'] = df['date'].dt.strftime('%Y/%-m/%-d')
 
