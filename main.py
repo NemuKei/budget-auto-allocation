@@ -240,15 +240,20 @@ def apply_distribution(dates, ratios, total, step):
     def single_ratio(date, key):
         dtype = day_type(date)
         info = holiday_block_info(date)
-        # consecutive holiday/weekend block adjustment
+        # year end/new year special handling
+        if date.month == 12 and date.day == 31:
+            return base_sat
+        if date.month == 1 and date.day == 1:
+            return base_sat * 0.9
+        if date.month == 1 and date.day == 2:
+            return base_sat * 0.9 * 0.8
+
+        # consecutive holiday/weekend block adjustment with decay
         if info and info[1] >= 3:
-            idx, _ = info
-            if idx == 1:
-                return base_sat * 1.05
-            elif idx == 2:
-                return base_sat * 0.9
-            else:
-                return base_sat * 0.85
+            idx, length = info
+            if idx == length:
+                return ratios.get(key, 0)
+            return base_sat * (0.9 ** (idx - 1))
         # pre-holiday dates share Saturday ratio
         if dtype in ('pre', 'preholiday'):
             return base_sat
@@ -541,6 +546,12 @@ def process(settings: Settings):
                 df.at[idx, '宿泊売上'] = daily_rev_cap
                 logging.warning('daily revenue clipped to cap on %s', r['date'])
 
+        # scale down if revenue sum exceeds monthly budget
+        total_revenue = df['宿泊売上'].sum()
+        if total_revenue > row['宿泊売上']:
+            scale = row['宿泊売上'] / total_revenue
+            df['宿泊売上'] = (df['宿泊売上'] * scale).round()
+
         # ensure monthly totals match budget after all adjustments
         for col, step, total_val in [
             ('宿泊売上', 100, row['宿泊売上']),
@@ -549,6 +560,8 @@ def process(settings: Settings):
         ]:
             if col == '人数':
                 df[col] = adjust_to_total_with_cap(df[col], total_val, step, guest_upper).round().astype(int)
+            elif col == '室数':
+                df[col] = adjust_to_total_with_cap(df[col], total_val, step, room_upper_bound).round().astype(int)
             else:
                 df[col] = adjust_to_total(df[col], total_val, step)
 
@@ -557,6 +570,7 @@ def process(settings: Settings):
         occ_before = df['室数'] / settings.capacity
         df['室数'] = df['室数'].clip(upper=cap_val)
         df['室数'] = adjust_to_total_with_cap(df['室数'], row['室数'], 1, cap_val)
+        df['人数'] = adjust_to_total_with_cap(df['人数'], row['人数'], 1, guest_upper)
         occ_after = df['室数'] / settings.capacity
         deviation = (occ_after - occ_before).abs() / occ_before.replace(0, np.nan)
         for idx in df.index[deviation > 0.1]:
