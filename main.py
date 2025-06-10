@@ -344,21 +344,81 @@ def process(settings: Settings):
     year_start = datetime(settings.fiscal_year, 6, 1)
     output_book = {}
 
+    latest_date = daily['date'].max()
+    recent_start = latest_date - pd.DateOffset(days=30)
+    recent_end = latest_date - pd.DateOffset(days=1)
+    range_recent_mask = (daily['date'] >= recent_start) & (daily['date'] <= recent_end)
+    dist_recent_base = weekday_dist(daily.loc[range_recent_mask], '宿泊売上')
+
+    range_23_start = latest_date - pd.DateOffset(days=90)
+    range_23_end = latest_date - pd.DateOffset(days=30)
+    range_23_mask = (daily['date'] >= range_23_start) & (daily['date'] < range_23_end)
+    dist_23_base = weekday_dist(daily.loc[range_23_mask], '宿泊売上')
+
+    logging.info(
+        "weekday dist base ranges recent=%s to %s, 2-3m=%s to %s",
+        recent_start.date(), recent_end.date(),
+        range_23_start.date(), (range_23_end - pd.Timedelta(days=1)).date(),
+    )
+
     for _, row in monthly.iterrows():
         year = int(row['年'])
         month = int(row['月'])
         logging.info("processing %d-%02d", year, month)
         start = datetime(year, month, 1)
         end = (start + pd.offsets.MonthEnd()).to_pydatetime()
-        mask_prev = (daily['date'] >= start - pd.DateOffset(years=1)) & (daily['date'] <= end - pd.DateOffset(years=1))
-        mask_23 = (daily['date'] >= start - pd.DateOffset(days=90)) & (daily['date'] <= start - pd.DateOffset(days=30))
+
+        prev_start1 = start - pd.DateOffset(years=1)
+        prev_end1 = end - pd.DateOffset(years=1)
+        mask_prev1 = (daily['date'] >= prev_start1) & (daily['date'] <= prev_end1)
+        mask_prev2 = pd.Series(False, index=daily.index)
+
+        dist_prev = {}
+        prev_label = None
+        if not daily.loc[mask_prev1].empty:
+            dist_prev = weekday_dist(daily.loc[mask_prev1], '宿泊売上')
+            prev_label = f"{prev_start1.date()} to {prev_end1.date()}"
+            logging.info("same month last year used for %d-%02d: %s", year, month, prev_label)
+        else:
+            prev_start2 = start - pd.DateOffset(years=2)
+            prev_end2 = end - pd.DateOffset(years=2)
+            mask_prev2 = (daily['date'] >= prev_start2) & (daily['date'] <= prev_end2)
+            if not daily.loc[mask_prev2].empty:
+                dist_prev = weekday_dist(daily.loc[mask_prev2], '宿泊売上')
+                prev_label = f"{prev_start2.date()} to {prev_end2.date()} (2y)"
+                logging.info("same month fallback 2yrs for %d-%02d: %s", year, month, prev_label)
+            else:
+                logging.info("same month data missing for %d-%02d", year, month)
+
+        mask_prev = mask_prev1 if not daily.loc[mask_prev1].empty else mask_prev2
         mask_recent = (daily['date'] >= start - pd.DateOffset(days=30)) & (daily['date'] < start)
-        dists = [
-            weekday_dist(daily.loc[mask_prev], '宿泊売上'),
-            weekday_dist(daily.loc[mask_23], '宿泊売上'),
-            weekday_dist(daily.loc[mask_recent], '宿泊売上'),
-        ]
-        ratios = weighted_dist(dists, [settings.weight_prev_year, settings.weight_2_3m, settings.weight_recent])
+
+        dists = []
+        weights = []
+        labels = []
+        if dist_prev:
+            dists.append(dist_prev)
+            weights.append(settings.weight_prev_year)
+            labels.append('prev')
+        if dist_23_base:
+            dists.append(dist_23_base)
+            weights.append(settings.weight_2_3m)
+            labels.append('2-3m')
+        if dist_recent_base:
+            dists.append(dist_recent_base)
+            weights.append(settings.weight_recent)
+            labels.append('recent')
+
+        if not weights:
+            ratios = {}
+            logging.warning("no historical data for weekday distribution %d-%02d", year, month)
+        else:
+            total_w = sum(weights)
+            weights = [w / total_w for w in weights]
+            ratios = weighted_dist(dists, weights)
+            weight_info = {l: round(w, 3) for l, w in zip(labels, weights)}
+            logging.info("distribution weights for %d-%02d: %s", year, month, weight_info)
+
         logging.debug("ratios %s", ratios)
         dates = pd.date_range(start, end)
         df = pd.DataFrame({'date': dates})
