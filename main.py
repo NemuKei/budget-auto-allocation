@@ -132,6 +132,12 @@ def is_pre_block(date: datetime) -> bool:
 
 def day_type(date: datetime) -> str:
     """Classify ``date`` into day types used for distribution."""
+    # Explicit keys for year end and New Year
+    if date.month == 12 and date.day == 31:
+        return "NYE"
+    if date.month == 1 and date.day == 1:
+        return "NYD"
+
     info = holiday_block_info(date)
     if info:
         index, _ = info
@@ -148,9 +154,6 @@ def day_type(date: datetime) -> str:
 def day_key(date: datetime):
     """Return a tuple representing the weekday and day type used for ratios."""
     dtype = day_type(date)
-    # Pre-holiday dates share the Saturday coefficient for distribution
-    if dtype in ('pre', 'preholiday'):
-        return (5, 'normal')
     return (date.weekday(), dtype)
 
 
@@ -170,6 +173,10 @@ def weekday_dist(df: pd.DataFrame, col: str) -> dict:
     grouped = df.groupby('key')[col].sum()
 
     keys = set(grouped.index)
+    # ensure base weekday keys exist for fallback
+    for i in range(7):
+        keys.add((i, 'normal'))
+
     base = 0.01  # smoothing factor so rare keys don't vanish
     dist = {k: grouped.get(k, 0.0) + base for k in keys}
 
@@ -207,8 +214,7 @@ def weighted_dist(dists, weights):
 def day_weight(date: datetime, key) -> float:
     """Return additional weight factor for the date.
 
-    The new rules do not apply smoothing based on day type here; all
-    adjustments are handled in ``apply_distribution``.
+    Placeholder for future per-day weighting logic. Currently returns ``1.0``.
     """
     return 1.0
 
@@ -217,51 +223,10 @@ def apply_distribution(dates, ratios, total, step):
     if not ratios:
         return pd.Series([0] * len(dates), index=dates)
 
-    # count how many times each key appears in the target dates
     keys = [day_key(d) for d in dates]
-    counts = {}
-    for k in keys:
-        counts[k] = counts.get(k, 0) + 1
-
-    # check if ratios sufficiently cover the keys; otherwise fall back to uniform
-    ratio_sum = sum(ratios.get(k, 0) for k in counts)
-    missing = [k for k in counts if ratios.get(k, 0) == 0]
-    if ratio_sum == 0 or len(missing) > len(counts) / 2:
-        logging.info("apply_distribution fallback to uniform distribution")
-        ratios = {k: 1 / len(counts) for k in counts}
-    else:
-        logging.debug("apply_distribution using normal distribution")
-
-    # ensure Saturday acts as the anchor ratio among normal weekdays
-    normal_keys = [(i, 'normal') for i in range(7)]
-    max_normal = max((ratios.get(k, 0) for k in normal_keys), default=0)
-    base_sat = max(ratios.get((5, 'normal'), 0), max_normal)
-
-    def single_ratio(date, key):
-        dtype = day_type(date)
-        info = holiday_block_info(date)
-        # year end/new year special handling
-        if date.month == 12 and date.day == 31:
-            return base_sat
-        if date.month == 1 and date.day == 1:
-            return base_sat * 0.9
-        if date.month == 1 and date.day == 2:
-            return base_sat * 0.9 * 0.8
-
-        # consecutive holiday/weekend block adjustment with decay
-        if info and info[1] >= 3:
-            idx, length = info
-            if idx == length:
-                return ratios.get(key, 0)
-            return base_sat * (0.9 ** (idx - 1))
-        # pre-holiday dates share Saturday ratio
-        if dtype in ('pre', 'preholiday'):
-            return base_sat
-        return ratios.get(key, 0)
-
     weights = np.array([
-        single_ratio(d, k) * day_weight(d, k) / counts.get(k, 1)
-        for d, k in zip(dates, keys)
+        ratios.get(k, ratios.get((k[0], 'normal'), 0))
+        for k in keys
     ])
 
     if weights.sum() == 0:
