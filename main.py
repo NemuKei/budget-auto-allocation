@@ -367,6 +367,8 @@ def allocate_from_ratios(dates, ratios, total, step):
 
 def compute_daily_ratios(dates, dist):
     """Return per-date ratios using ``dist`` keyed by ``day_key``."""
+    base_sat = dist.get((5, "normal"), 1.0)
+
     def resolve(key):
         if key in dist:
             return dist[key]
@@ -379,7 +381,7 @@ def compute_daily_ratios(dates, dist):
             except ValueError:
                 return dist.get((weekday, "normal"), 0)
             if n == 1:
-                return dist.get((5, "normal"), dist.get((weekday, "normal"), 0))
+                return base_sat
             prev = resolve((weekday, f"holiday{n-1}"))
             return prev * 0.9
         return dist.get((weekday, "normal"), 0)
