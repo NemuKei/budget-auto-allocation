@@ -101,7 +101,7 @@ def is_holiday_or_weekend(d: datetime) -> bool:
 def holiday_block_info(date: datetime):
     """Return (index, length) if ``date`` belongs to a holiday/weekend block.
 
-    A block is a consecutive stretch of holiday/weekend days of length three or
+    A block is a consecutive stretch of holiday/weekend days of length two or
     more.  Adjacent weekends around long holidays are included in the block.
     """
 
@@ -375,54 +375,68 @@ def allocate_from_ratios(dates, ratios, total, step):
 
 
 def compute_daily_ratios(dates, weekday_ratios):
-    """Return per-date ratios applying new holiday/seasonal rules."""
+    """Return per-date ratios applying holiday and seasonal adjustments."""
     ratios = []
     base_sat = weekday_ratios.get(5, 1.0)
     prev_ratio = None
     for d in dates:
-        # base ratio from weekday
+        # start with weekday base ratio
         r = weekday_ratios.get(d.weekday(), 1.0)
+        reason = f"weekday{d.weekday()}"
 
-        # Golden Week special handling
+        # Golden Week (April tail and early May)
+        if d.month == 4 and d.day >= 27:
+            r *= 1.10
+            reason += ", gw_april*1.10"
         if d.month == 5 and d.day in (1, 2):
             r *= 1.10
+            reason += ", gw_pre*1.10"
         elif d.month == 5 and 3 <= d.day <= 6:
             if d.day == 3:
                 r = base_sat * 1.20
+                reason = "gw_first, base_sat*1.20"
             elif d.day == 6:
                 r = weekday_ratios.get(d.weekday(), 1.0) * 0.80
+                reason = "gw_last, weekday*0.80"
             else:
                 r = (prev_ratio or base_sat) * 0.95
-
+                reason = f"gw_mid, prev_or_sat*0.95"
         # Year-end and New Year adjustments
         elif d.month == 12 and 24 <= d.day <= 30:
             r *= 1.10
+            reason += ", yearend*1.10"
         elif d.month == 12 and d.day == 31:
             r = base_sat * 1.20
+            reason = "NYE, base_sat*1.20"
         elif d.month == 1 and d.day == 1:
             r = base_sat * 1.20
+            reason = "NYD, base_sat*1.20"
         elif d.month == 1 and d.day == 2:
             r = base_sat * 0.90
-
-        # Regular holiday blocks (3+ days)
+            reason = "jan2, base_sat*0.90"
         else:
             info = holiday_block_info(d)
-            if info and info[1] >= 3:
+            if info and info[1] >= 2:
                 idx, length = info
                 if idx == 1:
                     r = base_sat * 1.05
+                    reason = f"holiday{idx}, base_sat*1.05"
                 elif idx == length:
                     r = weekday_ratios.get(d.weekday(), 1.0) * 0.90
+                    reason = f"holiday{idx}, weekday*0.90"
                 else:
                     r = (prev_ratio or base_sat) * 0.90
+                    reason = f"holiday{idx}, prev_or_sat*0.90"
             elif jpholiday.is_holiday(d):
-                # treat holiday the same as weekend
-                r = base_sat
+                # single holiday - use weekday ratio
+                reason += ", single_holiday"
 
         # March second half boost
         if d.month == 3 and d.day >= 15:
             r *= 1.10
+            reason += ", mar_boost*1.10"
 
+        logging.debug("%s: %s", d.strftime('%-m/%-d'), reason)
         ratios.append(r)
         prev_ratio = r
 
@@ -677,9 +691,14 @@ def process(settings: Settings):
         occ_before = df['室数'] / settings.capacity
         df['室数'] = df['室数'].clip(upper=cap_val)
         df['室数'] = adjust_to_total_with_cap(df['室数'], row['室数'], 1, cap_val)
-        df['室数'] = adjust_to_total(df['室数'], row['室数'], 1).round().astype(int)
+        df['室数'] = adjust_to_total(df['室数'], row['室数'], 1)
+        df['室数'] = df['室数'].round().astype(int)
+        df['室数'] = adjust_to_total(df['室数'], row['室数'], 1).astype(int)
+
         df['人数'] = adjust_to_total_with_cap(df['人数'], row['人数'], 1, guest_upper)
-        df['人数'] = adjust_to_total(df['人数'], row['人数'], 1).round().astype(int)
+        df['人数'] = adjust_to_total(df['人数'], row['人数'], 1)
+        df['人数'] = df['人数'].round().astype(int)
+        df['人数'] = adjust_to_total(df['人数'], row['人数'], 1).astype(int)
         occ_after = df['室数'] / settings.capacity
         deviation = (occ_after - occ_before).abs() / occ_before.replace(0, np.nan)
         for idx in df.index[deviation > 0.1]:
