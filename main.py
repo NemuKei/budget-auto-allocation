@@ -689,9 +689,9 @@ def process(settings: Settings):
         step_breakfast = get_rounding_step_smart(row['朝食売上'])
         df['朝食売上'] = adjust_to_total(base_revenue, row['朝食売上'], step_breakfast).astype(int)
 
-        step_fb_other = get_rounding_step_basic(row['料飲その他売上'])
+        step_fb_other = get_rounding_step_smart(row['料飲その他売上'])
         fb_other = uniform_allocation_by_step(dates, row['料飲その他売上'], step_fb_other)
-        step_other = get_rounding_step_basic(row['その他売上'])
+        step_other = get_rounding_step_smart(row['その他売上'])
         other = uniform_allocation_by_step(dates, row['その他売上'], step_other)
         df['料飲その他売上'] = fb_other.values
         df['その他売上'] = other.values
