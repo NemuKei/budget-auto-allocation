@@ -677,9 +677,9 @@ def process(settings: Settings):
         occ_before = df['室数'] / settings.capacity
         df['室数'] = df['室数'].clip(upper=cap_val)
         df['室数'] = adjust_to_total_with_cap(df['室数'], row['室数'], 1, cap_val)
-        df['室数'] = adjust_to_total(df['室数'], row['室数'], 1)
+        df['室数'] = adjust_to_total(df['室数'], row['室数'], 1).round().astype(int)
         df['人数'] = adjust_to_total_with_cap(df['人数'], row['人数'], 1, guest_upper)
-        df['人数'] = adjust_to_total(df['人数'], row['人数'], 1)
+        df['人数'] = adjust_to_total(df['人数'], row['人数'], 1).round().astype(int)
         occ_after = df['室数'] / settings.capacity
         deviation = (occ_after - occ_before).abs() / occ_before.replace(0, np.nan)
         for idx in df.index[deviation > 0.1]:
@@ -709,7 +709,7 @@ def process(settings: Settings):
         df['date'] = df['date'].dt.strftime('%Y/%-m/%-d')
 
         sum_cols = [c for c in df.columns if c not in kpi_cols + ['曜日', '祝日名', 'date']]
-        summary = df[sum_cols].sum(numeric_only=True)
+        summary = df[sum_cols].sum(numeric_only=True).round().astype(int)
         r_total = summary.get('宿泊売上', 0)
         room_total = summary.get('室数', 0)
         guest_total = summary.get('人数', 0)
