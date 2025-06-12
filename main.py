@@ -436,7 +436,7 @@ def compute_daily_ratios(dates, weekday_ratios):
             r *= 1.10
             reason += ", mar_boost*1.10"
 
-        logging.debug("%s: %s", d.strftime('%-m/%-d'), reason)
+        logging.debug("%s: %s", f"{d.month}/{d.day}", reason)
         ratios.append(r)
         prev_ratio = r
 
