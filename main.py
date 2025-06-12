@@ -854,4 +854,15 @@ def run_gui():
     root.mainloop()
 
 if __name__ == '__main__':
-    run_gui()
+    def show_main_gui():
+        splash.destroy()
+        run_gui()
+
+    splash = tk.Tk()
+    splash.overrideredirect(True)
+    splash.geometry("320x160+600+300")
+    splash.configure(bg="white")
+    label = tk.Label(splash, text="日別予算ツール 起動中...", font=("Arial", 14), bg="white")
+    label.pack(expand=True)
+    splash.after(2000, show_main_gui)
+    splash.mainloop()
