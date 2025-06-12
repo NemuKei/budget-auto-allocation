@@ -318,10 +318,22 @@ def uniform_allocation(dates, total, step):
 
 
 def get_rounding_step(value):
-    """Return rounding step (10 or 100) based on value precision."""
-    if pd.isna(value):
+    """Return step size depending on the value's least significant digit.
+
+    The step is automatically detected so that numbers already rounded to a
+    higher unit keep that precision when distributing monthly totals.  For
+    example ``12_300`` should use ``100`` as the rounding step and ``123_000``
+    should use ``1000``.  Values that are ``NaN`` or ``0`` fall back to ``100``.
+    """
+
+    if pd.isna(value) or value == 0:
         return 100
-    return 10 if round(value * 10) % 10 != 0 else 100
+
+    v = int(value)
+    for step in (10_000, 1_000, 100, 10):
+        if v % step == 0:
+            return step
+    return 10
 
 
 def weekday_ratio(df: pd.DataFrame, col: str) -> dict:
