@@ -317,6 +317,13 @@ def uniform_allocation(dates, total, step):
     return base
 
 
+def get_rounding_step(value):
+    """Return rounding step (10 or 100) based on value precision."""
+    if pd.isna(value):
+        return 100
+    return 10 if round(value * 10) % 10 != 0 else 100
+
+
 def weekday_ratio(df: pd.DataFrame, col: str) -> dict:
     """Return weekday ratio excluding holidays and year-end special dates."""
     if df.empty:
@@ -631,12 +638,15 @@ def process(settings: Settings):
         base_count = (person_ratio * breakfast_count).round()
         df['喫食数'] = adjust_to_total(base_count, breakfast_count, 1).round().astype(int)
 
-        # breakfast revenue should also be integer (100 yen step)
+        # breakfast revenue rounding step determined by monthly budget precision
         base_revenue = (df['喫食数'] * settings.breakfast_price).round()
-        df['朝食売上'] = adjust_to_total(base_revenue, row['朝食売上'], 100).round().astype(int)
+        step_breakfast = get_rounding_step(row['朝食売上'])
+        df['朝食売上'] = adjust_to_total(base_revenue, row['朝食売上'], step_breakfast).round().astype(int)
 
-        fb_other = uniform_allocation(dates, row['料飲その他売上'], 100)
-        other = uniform_allocation(dates, row['その他売上'], 100)
+        step_fb_other = get_rounding_step(row['料飲その他売上'])
+        fb_other = uniform_allocation(dates, row['料飲その他売上'], step_fb_other)
+        step_other = get_rounding_step(row['その他売上'])
+        other = uniform_allocation(dates, row['その他売上'], step_other)
         df['料飲その他売上'] = fb_other.values
         df['その他売上'] = other.values
 
