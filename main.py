@@ -317,6 +317,25 @@ def uniform_allocation(dates, total, step):
     return base
 
 
+def uniform_allocation_by_step(dates, total, step):
+    """Distribute ``total`` uniformly in ``step`` units with balanced residual."""
+
+    n = len(dates)
+    if n == 0 or total == 0:
+        return pd.Series([0] * n, index=dates)
+
+    base_value = (total // step) // n * step
+    base = pd.Series([base_value] * n, index=dates)
+
+    residual = total - base.sum()
+    steps = residual // step
+
+    for i in range(int(steps)):
+        base.iloc[i % n] += step
+
+    return base
+
+
 def get_rounding_step_basic(value):
     """Return rounding step based purely on the number's precision."""
 
@@ -669,9 +688,9 @@ def process(settings: Settings):
         df['朝食売上'] = adjust_to_total(base_revenue, row['朝食売上'], step_breakfast).astype(int)
 
         step_fb_other = get_rounding_step_basic(row['料飲その他売上'])
-        fb_other = uniform_allocation(dates, row['料飲その他売上'], step_fb_other)
+        fb_other = uniform_allocation_by_step(dates, row['料飲その他売上'], step_fb_other)
         step_other = get_rounding_step_basic(row['その他売上'])
-        other = uniform_allocation(dates, row['その他売上'], step_other)
+        other = uniform_allocation_by_step(dates, row['その他売上'], step_other)
         df['料飲その他売上'] = fb_other.values
         df['その他売上'] = other.values
 
