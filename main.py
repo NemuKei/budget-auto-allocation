@@ -375,33 +375,57 @@ def allocate_from_ratios(dates, ratios, total, step):
 
 
 def compute_daily_ratios(dates, weekday_ratios):
-    """Return per-date ratios applying holiday rules."""
+    """Return per-date ratios applying new holiday/seasonal rules."""
     ratios = []
     base_sat = weekday_ratios.get(5, 1.0)
     prev_ratio = None
     for d in dates:
-        if d.month == 12 and d.day == 31:
-            r = base_sat
-        elif d.month == 1 and d.day == 1:
-            r = base_sat * 0.9
-        elif d.month == 1 and d.day == 2:
-            r = base_sat * 0.9 * 0.8
-        else:
-            block = holiday_block_info(d)
-            if block:
-                idx, length = block
-                if idx == 1:
-                    r = base_sat
-                elif idx == length:
-                    r = weekday_ratios.get(d.weekday(), 1.0) * 0.9
-                else:
-                    r = (prev_ratio or base_sat) * 0.9
-            elif jpholiday.is_holiday(d):
-                r = base_sat
+        # base ratio from weekday
+        r = weekday_ratios.get(d.weekday(), 1.0)
+
+        # Golden Week special handling
+        if d.month == 5 and d.day in (1, 2):
+            r *= 1.10
+        elif d.month == 5 and 3 <= d.day <= 6:
+            if d.day == 3:
+                r = base_sat * 1.20
+            elif d.day == 6:
+                r = weekday_ratios.get(d.weekday(), 1.0) * 0.80
             else:
-                r = weekday_ratios.get(d.weekday(), 1.0)
+                r = (prev_ratio or base_sat) * 0.95
+
+        # Year-end and New Year adjustments
+        elif d.month == 12 and 24 <= d.day <= 30:
+            r *= 1.10
+        elif d.month == 12 and d.day == 31:
+            r = base_sat * 1.20
+        elif d.month == 1 and d.day == 1:
+            r = base_sat * 1.20
+        elif d.month == 1 and d.day == 2:
+            r = base_sat * 0.90
+
+        # Regular holiday blocks (3+ days)
+        else:
+            info = holiday_block_info(d)
+            if info and info[1] >= 3:
+                idx, length = info
+                if idx == 1:
+                    r = base_sat * 1.05
+                elif idx == length:
+                    r = weekday_ratios.get(d.weekday(), 1.0) * 0.90
+                else:
+                    r = (prev_ratio or base_sat) * 0.90
+            elif jpholiday.is_holiday(d):
+                # treat holiday the same as weekend
+                r = base_sat
+
+        # March second half boost
+        if d.month == 3 and d.day >= 15:
+            r *= 1.10
+
         ratios.append(r)
         prev_ratio = r
+
     return pd.Series(ratios, index=dates)
 
 
