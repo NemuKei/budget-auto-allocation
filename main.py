@@ -639,7 +639,7 @@ def process(settings: Settings):
         df['喫食数'] = adjust_to_total(base_count, breakfast_count, 1).round().astype(int)
 
         # breakfast revenue rounding step determined by monthly budget precision
-        base_revenue = (df['喫食数'] * settings.breakfast_price).round()
+        base_revenue = df['喫食数'] * settings.breakfast_price
         step_breakfast = get_rounding_step(row['朝食売上'])
         df['朝食売上'] = adjust_to_total(base_revenue, row['朝食売上'], step_breakfast).round().astype(int)
 
