@@ -317,14 +317,8 @@ def uniform_allocation(dates, total, step):
     return base
 
 
-def get_rounding_step(value):
-    """Return step size depending on the value's least significant digit.
-
-    The step is automatically detected so that numbers already rounded to a
-    higher unit keep that precision when distributing monthly totals.  For
-    example ``12_300`` should use ``100`` as the rounding step and ``123_000``
-    should use ``1000``.  Values that are ``NaN`` or ``0`` fall back to ``100``.
-    """
+def get_rounding_step_basic(value):
+    """Return rounding step based purely on the number's precision."""
 
     if pd.isna(value) or value == 0:
         return 100
@@ -333,6 +327,24 @@ def get_rounding_step(value):
     for step in (10_000, 1_000, 100, 10):
         if v % step == 0:
             return step
+    return 10
+
+
+def get_rounding_step_smart(value):
+    """Return step for lodging/breakfast revenue with 10k -> 1k rule.
+
+    If the monthly value is rounded to ten-thousand yen, it allocates by
+    thousand yen.  Otherwise it follows the same precision as
+    :func:`get_rounding_step_basic` with a minimum of 10 yen.
+    """
+
+    if pd.isna(value) or value == 0:
+        return 100
+
+    v = int(value)
+    for step in (10_000, 1_000, 100, 10):
+        if v % step == 0:
+            return 1_000 if step == 10_000 else step
     return 10
 
 
@@ -579,14 +591,15 @@ def process(settings: Settings):
 
         dates = pd.date_range(start, end)
         df = pd.DataFrame({'date': dates})
+        step_revenue = get_rounding_step_smart(row['宿泊売上'])
         for m in metrics:
             daily_ratios = compute_daily_ratios(dates, ratios_month[m])
-            step = 100 if m == '宿泊売上' else 1
+            step = step_revenue if m == '宿泊売上' else 1
             df[m] = allocate_from_ratios(dates, daily_ratios.values, row[m], step).values
 
         # ensure no zero allocations for key metrics
         for col, step, total_val in [
-            ('宿泊売上', 100, row['宿泊売上']),
+            ('宿泊売上', step_revenue, row['宿泊売上']),
             ('室数', 1, row['室数']),
             ('人数', 1, row['人数']),
         ]:
@@ -621,7 +634,7 @@ def process(settings: Settings):
             df['宿泊売上'] = df['宿泊売上'].clip(lower=revenue_floor)
             if not before.equals(df['宿泊売上']):
                 logging.info('revenue floor %.0f applied for %d-%02d', revenue_floor, year, month)
-            df['宿泊売上'] = adjust_to_total(df['宿泊売上'], row['宿泊売上'], 100)
+            df['宿泊売上'] = adjust_to_total(df['宿泊売上'], row['宿泊売上'], step_revenue)
 
         # guest count bounds based on history
         guest_prev_max = daily.loc[mask_prev, '人数'].max()
@@ -652,12 +665,12 @@ def process(settings: Settings):
 
         # breakfast revenue rounding step determined by monthly budget precision
         base_revenue = df['喫食数'] * settings.breakfast_price
-        step_breakfast = get_rounding_step(row['朝食売上'])
+        step_breakfast = get_rounding_step_smart(row['朝食売上'])
         df['朝食売上'] = adjust_to_total(base_revenue, row['朝食売上'], step_breakfast).astype(int)
 
-        step_fb_other = get_rounding_step(row['料飲その他売上'])
+        step_fb_other = get_rounding_step_basic(row['料飲その他売上'])
         fb_other = uniform_allocation(dates, row['料飲その他売上'], step_fb_other)
-        step_other = get_rounding_step(row['その他売上'])
+        step_other = get_rounding_step_basic(row['その他売上'])
         other = uniform_allocation(dates, row['その他売上'], step_other)
         df['料飲その他売上'] = fb_other.values
         df['その他売上'] = other.values
@@ -696,7 +709,7 @@ def process(settings: Settings):
 
         # ensure monthly totals match budget after all adjustments
         for col, step, total_val in [
-            ('宿泊売上', 100, row['宿泊売上']),
+            ('宿泊売上', step_revenue, row['宿泊売上']),
             ('室数', 1, row['室数']),
             ('人数', 1, row['人数']),
         ]:
