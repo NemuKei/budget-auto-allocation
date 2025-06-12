@@ -318,19 +318,21 @@ def uniform_allocation(dates, total, step):
 
 
 def uniform_allocation_by_step(dates, total, step):
-    """Distribute ``total`` uniformly in ``step`` units with balanced residual."""
+    """指定された ``step`` 単位で均等割りし、残差もなるべく均一に分配する"""
 
     n = len(dates)
     if n == 0 or total == 0:
         return pd.Series([0] * n, index=dates)
 
-    base_value = (total // step) // n * step
+    # exact average per day before rounding to step
+    per_day_raw = total / n
+    base_value = (per_day_raw // step) * step
     base = pd.Series([base_value] * n, index=dates)
 
     residual = total - base.sum()
-    steps = residual // step
+    steps = int(residual // step)
 
-    for i in range(int(steps)):
+    for i in range(steps):
         base.iloc[i % n] += step
 
     return base
