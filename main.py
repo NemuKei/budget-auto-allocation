@@ -278,6 +278,8 @@ def adjust_to_total(series: pd.Series, target: float, step: int):
 
 def adjust_to_total_with_cap(series: pd.Series, target: float, step: int, cap: float):
     """Adjust series to match ``target`` respecting a per-day ``cap``."""
+    if series.isna().any() or np.isinf(series).any():
+        raise ValueError('series contains invalid value')
     base = series.copy().astype(float).clip(upper=cap)
     diff = target - base.sum()
     if abs(diff) < step / 2:
@@ -548,6 +550,9 @@ def process(settings: Settings):
         year = int(row['年'])
         month = int(row['月'])
         logging.info("processing %d-%02d", year, month)
+        if any(row[c] == 0 or pd.isna(row[c]) for c in ['宿泊売上', '室数', '人数']):
+            logging.info('skip %d-%02d due to zero budget or allocation', year, month)
+            continue
         start = datetime(year, month, 1)
         end = (start + pd.offsets.MonthEnd()).to_pydatetime()
 
