@@ -673,7 +673,6 @@ def process(settings: Settings):
         if not np.isclose(before_sum, df['室数'].sum()):
             logging.warning('room count clipped for %d-%02d', year, month)
         df['室数'] = adjust_to_total_with_cap(df['室数'], row['室数'], 1, room_upper_bound)
-        df['室数'] = adjust_to_total(df['室数'], row['室数'], 1)
 
         # minimum revenue threshold based on historical lows
         prev_min = daily.loc[mask_prev, '宿泊売上'].min()
@@ -767,8 +766,7 @@ def process(settings: Settings):
             if col == '人数':
                 df[col] = adjust_to_total_with_cap(df[col], total_val, step, guest_upper).round().astype(int)
             elif col == '室数':
-                df[col] = adjust_to_total_with_cap(df[col], total_val, step, room_upper_bound)
-                df[col] = adjust_to_total(df[col], total_val, step).round().astype(int)
+                df[col] = adjust_to_total_with_cap(df[col], total_val, step, room_upper_bound).round().astype(int)
             else:
                 df[col] = adjust_to_total(df[col], total_val, step)
 
@@ -776,15 +774,10 @@ def process(settings: Settings):
         cap_val = min(room_upper_bound, settings.capacity)
         occ_before = df['室数'] / settings.capacity
         df['室数'] = df['室数'].clip(upper=cap_val)
-        df['室数'] = adjust_to_total_with_cap(df['室数'], row['室数'], 1, cap_val)
-        df['室数'] = adjust_to_total(df['室数'], row['室数'], 1)
-        df['室数'] = df['室数'].round().astype(int)
-        df['室数'] = adjust_to_total(df['室数'], row['室数'], 1).astype(int)
 
-        df['人数'] = adjust_to_total_with_cap(df['人数'], row['人数'], 1, guest_upper)
-        df['人数'] = adjust_to_total(df['人数'], row['人数'], 1)
-        df['人数'] = df['人数'].round().astype(int)
-        df['人数'] = adjust_to_total(df['人数'], row['人数'], 1).astype(int)
+        df['室数'] = adjust_to_total_with_cap(df['室数'], row['室数'], 1, cap_val).round().astype(int)
+
+        df['人数'] = adjust_to_total_with_cap(df['人数'], row['人数'], 1, guest_upper).round().astype(int)
         occ_after = df['室数'] / settings.capacity
         deviation = (occ_after - occ_before).abs() / occ_before.replace(0, np.nan)
         for idx in df.index[deviation > 0.1]:
