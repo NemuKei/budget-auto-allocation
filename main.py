@@ -257,22 +257,29 @@ def apply_distribution(dates, ratios, total, step):
     return pd.Series(floor, index=dates)
 
 
+MAX_ITER = 10000
+
 def adjust_to_total(series: pd.Series, target: float, step: int):
     if series.isna().any() or np.isinf(series).any():
         raise ValueError('series contains invalid value')
     base = series.copy().astype(float)
     diff = target - base.sum()
+    if abs(diff) < step:
+        base.iloc[-1] += diff
+        return base
     order = np.argsort(base - np.floor(base/step)*step)[::-1].to_numpy()
     rng = np.random.default_rng()
     rng.shuffle(order)
     i = 0
-    while abs(diff) >= step/2:
+    while abs(diff) >= step/2 and i < MAX_ITER:
         idx = series.index[order[i % len(order)]]
         base[idx] += step if diff > 0 else -step
         diff += -step if diff > 0 else step
         i += 1
         if i % len(order) == 0:
             rng.shuffle(order)
+    if i >= MAX_ITER:
+        raise RuntimeError("adjust_to_total: max iteration limit exceeded")
     return base
 
 
@@ -282,7 +289,9 @@ def adjust_to_total_with_cap(series: pd.Series, target: float, step: int, cap: f
         raise ValueError('series contains invalid value')
     base = series.copy().astype(float).clip(upper=cap)
     diff = target - base.sum()
-    if abs(diff) < step / 2:
+    if abs(diff) < step:
+        if len(base) > 0:
+            base.iloc[-1] += diff
         return base
 
     free_mask = base < cap if diff > 0 else base > 0
@@ -297,7 +306,7 @@ def adjust_to_total_with_cap(series: pd.Series, target: float, step: int, cap: f
 
     idxs = list(base.index[free_mask])
     i = 0
-    while abs(diff) >= step / 2 and idxs:
+    while abs(diff) >= step / 2 and idxs and i < MAX_ITER:
         idx = idxs[i % len(idxs)]
         if diff > 0 and base[idx] + step <= cap:
             base[idx] += step
@@ -306,6 +315,11 @@ def adjust_to_total_with_cap(series: pd.Series, target: float, step: int, cap: f
             base[idx] -= step
             diff += step
         i += 1
+    if i >= MAX_ITER:
+        raise RuntimeError("adjust_to_total_with_cap: max iteration limit exceeded")
+    if abs(diff) < step and len(base) > 0:
+        base.iloc[-1] += diff
+        diff = 0
     return base
 
 
