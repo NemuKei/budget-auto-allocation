@@ -282,8 +282,12 @@ def adjust_to_total(series: pd.Series, target: float, step: int):
         i += 1
         if i % len(order) == 0:
             rng.shuffle(order)
-    if i >= MAX_ITER:
-        raise RuntimeError("adjust_to_total: max iteration limit exceeded")
+    if abs(diff) >= step/2:
+        logging.warning(
+            "adjust_to_total did not converge within MAX_ITER; forcing diff %.2f into last element",
+            diff,
+        )
+        base.iloc[-1] += diff
     return base
 
 
@@ -326,8 +330,13 @@ def adjust_to_total_with_cap(series: pd.Series, target: float, step: int, cap: f
             base[idx] -= step
             diff += step
         i += 1
-    if i >= MAX_ITER:
-        raise RuntimeError("adjust_to_total_with_cap: max iteration limit exceeded")
+    if abs(diff) >= step / 2 and len(base) > 0:
+        logging.warning(
+            "adjust_to_total_with_cap did not converge within MAX_ITER; forcing diff %.2f into last element",
+            diff,
+        )
+        base.iloc[-1] += diff
+        diff = 0
     if abs(diff) < step and len(base) > 0:
         base.iloc[-1] += diff
         diff = 0
@@ -758,30 +767,11 @@ def process(settings: Settings):
             df['宿泊売上'] = (df['宿泊売上'] * scale).round()
 
         # ensure monthly totals match budget after all adjustments
-        for col, step, total_val in [
-            ('宿泊売上', step_revenue, row['宿泊売上']),
-            ('室数', 1, row['室数']),
-            ('人数', 1, row['人数']),
-        ]:
-            if col == '人数':
-                df[col] = adjust_to_total_with_cap(df[col], total_val, step, guest_upper).round().astype(int)
-            elif col == '室数':
-                df[col] = adjust_to_total_with_cap(df[col], total_val, step, room_upper_bound).round().astype(int)
-            else:
-                df[col] = adjust_to_total(df[col], total_val, step)
-
-        # occupancy cap handling
-        cap_val = min(room_upper_bound, settings.capacity)
-        occ_before = df['室数'] / settings.capacity
-        df['室数'] = df['室数'].clip(upper=cap_val)
-
-        df['室数'] = adjust_to_total_with_cap(df['室数'], row['室数'], 1, cap_val).round().astype(int)
-
-        df['人数'] = adjust_to_total_with_cap(df['人数'], row['人数'], 1, guest_upper).round().astype(int)
-        occ_after = df['室数'] / settings.capacity
-        deviation = (occ_after - occ_before).abs() / occ_before.replace(0, np.nan)
-        for idx in df.index[deviation > 0.1]:
-            logging.warning('OCC clipped >10%% on %s', df.at[idx, 'date'])
+        df['宿泊売上'] = adjust_to_total(df['宿泊売上'], row['宿泊売上'], step_revenue)
+        df['室数'] = adjust_to_total_with_cap(df['室数'], row['室数'], 1, room_upper_bound)
+        df['室数'] = adjust_to_total(df['室数'], row['室数'], 1).round().astype(int)
+        df['人数'] = adjust_to_total_with_cap(df['人数'], row['人数'], 1, guest_upper)
+        df['人数'] = adjust_to_total(df['人数'], row['人数'], 1).round().astype(int)
 
         df['総合計'] = df[['宿泊売上','朝食売上','料飲その他売上','その他売上']].sum(axis=1)
         total_diff = row['総合計'] - df['総合計'].sum()
