@@ -297,6 +297,13 @@ def adjust_to_total_with_cap(series: pd.Series, target: float, step: int, cap: f
         if len(base) > 0:
             base.iloc[-1] += diff
         return base
+    if abs(diff) >= step * 10 and len(base) > 0:
+        logging.warning(
+            "adjust_to_total_with_cap: diff %.2f too large, forcing into last element",
+            diff,
+        )
+        base.iloc[-1] += diff
+        return base
 
     free_mask = base < cap if diff > 0 else base > 0
     if free_mask.any():
