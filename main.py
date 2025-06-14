@@ -267,6 +267,10 @@ def adjust_to_total(series: pd.Series, target: float, step: int):
     if abs(diff) < step:
         base.iloc[-1] += diff
         return base
+    if abs(diff) >= step * 10:
+        logging.warning("adjust_to_total: diff %.2f too large, forcing into last element", diff)
+        base.iloc[-1] += diff
+        return base
     order = np.argsort(base - np.floor(base/step)*step)[::-1].to_numpy()
     rng = np.random.default_rng()
     rng.shuffle(order)
