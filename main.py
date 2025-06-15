@@ -257,56 +257,30 @@ def apply_distribution(dates, ratios, total, step):
     return pd.Series(floor, index=dates)
 
 
-MAX_ITER = 10000
-
 def adjust_to_total(series: pd.Series, target: float, step: int):
     if series.isna().any() or np.isinf(series).any():
         raise ValueError('series contains invalid value')
     base = series.copy().astype(float)
     diff = target - base.sum()
-    if abs(diff) < step:
-        base.iloc[-1] += diff
-        return base
-    if abs(diff) >= step * 10:
-        logging.warning("adjust_to_total: diff %.2f too large, forcing into last element", diff)
-        base.iloc[-1] += diff
-        return base
     order = np.argsort(base - np.floor(base/step)*step)[::-1].to_numpy()
     rng = np.random.default_rng()
     rng.shuffle(order)
     i = 0
-    while abs(diff) >= step/2 and i < MAX_ITER:
+    while abs(diff) >= step/2:
         idx = series.index[order[i % len(order)]]
         base[idx] += step if diff > 0 else -step
         diff += -step if diff > 0 else step
         i += 1
         if i % len(order) == 0:
             rng.shuffle(order)
-    if abs(diff) >= step/2:
-        logging.warning(
-            "adjust_to_total did not converge within MAX_ITER; forcing diff %.2f into last element",
-            diff,
-        )
-        base.iloc[-1] += diff
     return base
 
 
 def adjust_to_total_with_cap(series: pd.Series, target: float, step: int, cap: float):
     """Adjust series to match ``target`` respecting a per-day ``cap``."""
-    if series.isna().any() or np.isinf(series).any():
-        raise ValueError('series contains invalid value')
     base = series.copy().astype(float).clip(upper=cap)
     diff = target - base.sum()
-    if abs(diff) < step:
-        if len(base) > 0:
-            base.iloc[-1] += diff
-        return base
-    if abs(diff) >= step * 10 and len(base) > 0:
-        logging.warning(
-            "adjust_to_total_with_cap: diff %.2f too large, forcing into last element",
-            diff,
-        )
-        base.iloc[-1] += diff
+    if abs(diff) < step / 2:
         return base
 
     free_mask = base < cap if diff > 0 else base > 0
@@ -321,7 +295,7 @@ def adjust_to_total_with_cap(series: pd.Series, target: float, step: int, cap: f
 
     idxs = list(base.index[free_mask])
     i = 0
-    while abs(diff) >= step / 2 and idxs and i < MAX_ITER:
+    while abs(diff) >= step / 2 and idxs:
         idx = idxs[i % len(idxs)]
         if diff > 0 and base[idx] + step <= cap:
             base[idx] += step
@@ -330,16 +304,6 @@ def adjust_to_total_with_cap(series: pd.Series, target: float, step: int, cap: f
             base[idx] -= step
             diff += step
         i += 1
-    if abs(diff) >= step / 2 and len(base) > 0:
-        logging.warning(
-            "adjust_to_total_with_cap did not converge within MAX_ITER; forcing diff %.2f into last element",
-            diff,
-        )
-        base.iloc[-1] += diff
-        diff = 0
-    if abs(diff) < step and len(base) > 0:
-        base.iloc[-1] += diff
-        diff = 0
     return base
 
 
@@ -584,9 +548,6 @@ def process(settings: Settings):
         year = int(row['年'])
         month = int(row['月'])
         logging.info("processing %d-%02d", year, month)
-        if any(row[c] == 0 or pd.isna(row[c]) for c in ['宿泊売上', '室数', '人数']):
-            logging.info('skip %d-%02d due to zero budget or allocation', year, month)
-            continue
         start = datetime(year, month, 1)
         end = (start + pd.offsets.MonthEnd()).to_pydatetime()
 
@@ -682,6 +643,7 @@ def process(settings: Settings):
         if not np.isclose(before_sum, df['室数'].sum()):
             logging.warning('room count clipped for %d-%02d', year, month)
         df['室数'] = adjust_to_total_with_cap(df['室数'], row['室数'], 1, room_upper_bound)
+        df['室数'] = adjust_to_total(df['室数'], row['室数'], 1)
 
         # minimum revenue threshold based on historical lows
         prev_min = daily.loc[mask_prev, '宿泊売上'].min()
@@ -767,11 +729,36 @@ def process(settings: Settings):
             df['宿泊売上'] = (df['宿泊売上'] * scale).round()
 
         # ensure monthly totals match budget after all adjustments
-        df['宿泊売上'] = adjust_to_total(df['宿泊売上'], row['宿泊売上'], step_revenue)
-        df['室数'] = adjust_to_total_with_cap(df['室数'], row['室数'], 1, room_upper_bound)
-        df['室数'] = adjust_to_total(df['室数'], row['室数'], 1).round().astype(int)
+        for col, step, total_val in [
+            ('宿泊売上', step_revenue, row['宿泊売上']),
+            ('室数', 1, row['室数']),
+            ('人数', 1, row['人数']),
+        ]:
+            if col == '人数':
+                df[col] = adjust_to_total_with_cap(df[col], total_val, step, guest_upper).round().astype(int)
+            elif col == '室数':
+                df[col] = adjust_to_total_with_cap(df[col], total_val, step, room_upper_bound)
+                df[col] = adjust_to_total(df[col], total_val, step).round().astype(int)
+            else:
+                df[col] = adjust_to_total(df[col], total_val, step)
+
+        # occupancy cap handling
+        cap_val = min(room_upper_bound, settings.capacity)
+        occ_before = df['室数'] / settings.capacity
+        df['室数'] = df['室数'].clip(upper=cap_val)
+        df['室数'] = adjust_to_total_with_cap(df['室数'], row['室数'], 1, cap_val)
+        df['室数'] = adjust_to_total(df['室数'], row['室数'], 1)
+        df['室数'] = df['室数'].round().astype(int)
+        df['室数'] = adjust_to_total(df['室数'], row['室数'], 1).astype(int)
+
         df['人数'] = adjust_to_total_with_cap(df['人数'], row['人数'], 1, guest_upper)
-        df['人数'] = adjust_to_total(df['人数'], row['人数'], 1).round().astype(int)
+        df['人数'] = adjust_to_total(df['人数'], row['人数'], 1)
+        df['人数'] = df['人数'].round().astype(int)
+        df['人数'] = adjust_to_total(df['人数'], row['人数'], 1).astype(int)
+        occ_after = df['室数'] / settings.capacity
+        deviation = (occ_after - occ_before).abs() / occ_before.replace(0, np.nan)
+        for idx in df.index[deviation > 0.1]:
+            logging.warning('OCC clipped >10%% on %s', df.at[idx, 'date'])
 
         df['総合計'] = df[['宿泊売上','朝食売上','料飲その他売上','その他売上']].sum(axis=1)
         total_diff = row['総合計'] - df['総合計'].sum()
@@ -867,4 +854,15 @@ def run_gui():
     root.mainloop()
 
 if __name__ == '__main__':
-    run_gui()
+    def show_main_gui():
+        splash.destroy()
+        run_gui()
+
+    splash = tk.Tk()
+    splash.overrideredirect(True)
+    splash.geometry("320x160+600+300")
+    splash.configure(bg="white")
+    label = tk.Label(splash, text="日別予算ツール 起動中...", font=("Arial", 14), bg="white")
+    label.pack(expand=True)
+    splash.after(2000, show_main_gui)
+    splash.mainloop()
