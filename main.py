@@ -742,7 +742,11 @@ def process(settings: Settings):
         if not pd.isna(row['料飲その他売上']) and row['料飲その他売上'] > 0:
             step_fb_other = get_rounding_step_smart(row['料飲その他売上'])
             fb_other = uniform_allocation_by_step(dates, row['料飲その他売上'], step_fb_other)
-            df['料飲その他売上'] = adjust_to_total(fb_other, row['料飲その他売上'], step_fb_other).astype(int)
+            df['料飲その他売上'] = adjust_to_total(
+                fb_other,
+                row['料飲その他売上'],
+                step_fb_other,
+            ).astype(int).values
         else:
             df['料飲その他売上'] = 0
 
@@ -750,7 +754,11 @@ def process(settings: Settings):
         if not pd.isna(row['その他売上']) and row['その他売上'] > 0:
             step_other = get_rounding_step_smart(row['その他売上'])
             other = uniform_allocation_by_step(dates, row['その他売上'], step_other)
-            df['その他売上'] = adjust_to_total(other, row['その他売上'], step_other).astype(int)
+            df['その他売上'] = adjust_to_total(
+                other,
+                row['その他売上'],
+                step_other,
+            ).astype(int).values
         else:
             df['その他売上'] = 0
 
@@ -921,15 +929,4 @@ def run_gui():
     root.mainloop()
 
 if __name__ == '__main__':
-    def show_main_gui():
-        splash.destroy()
-        run_gui()
-
-    splash = tk.Tk()
-    splash.overrideredirect(True)
-    splash.geometry("320x160+600+300")
-    splash.configure(bg="white")
-    label = tk.Label(splash, text="日別予算ツール 起動中...", font=("Arial", 14), bg="white")
-    label.pack(expand=True)
-    splash.after(2000, show_main_gui)
-    splash.mainloop()
+    run_gui()
