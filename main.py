@@ -786,13 +786,20 @@ def process(settings: Settings):
             ('料飲その他売上', step_fb_other, row['料飲その他売上']),
             ('その他売上', step_other, row['その他売上']),
         ]:
+            if col not in df.columns:
+                continue
+            if pd.isna(total_val) or total_val == 0:
+                continue
+            series = df[col].fillna(0)
+            if series.isna().all() or series.sum() == 0:
+                continue
             if col == '人数':
-                df[col] = adjust_to_total_with_cap(df[col], total_val, step, guest_upper).round().astype(int)
+                df[col] = adjust_to_total_with_cap(series, total_val, step, guest_upper).round().astype(int)
             elif col == '室数':
-                df[col] = adjust_to_total_with_cap(df[col], total_val, step, room_upper_bound)
+                df[col] = adjust_to_total_with_cap(series, total_val, step, room_upper_bound)
                 df[col] = adjust_to_total(df[col], total_val, step).round().astype(int)
             else:
-                df[col] = adjust_to_total(df[col], total_val, step).astype(int)
+                df[col] = adjust_to_total(series, total_val, step).astype(int)
 
         # occupancy cap handling
         cap_val = min(room_upper_bound, settings.capacity)
