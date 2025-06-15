@@ -738,13 +738,21 @@ def process(settings: Settings):
         step_breakfast = get_rounding_step_smart(row['朝食売上'])
         df['朝食売上'] = adjust_to_total(base_revenue, row['朝食売上'], step_breakfast).astype(int)
 
-        step_fb_other = get_rounding_step_smart(row['料飲その他売上'])
-        fb_other = uniform_allocation_by_step(dates, row['料飲その他売上'], step_fb_other)
-        df['料飲その他売上'] = adjust_to_total(fb_other, row['料飲その他売上'], step_fb_other).astype(int)
+        # --- 料飲その他売上の配分 ---
+        if not pd.isna(row['料飲その他売上']) and row['料飲その他売上'] > 0:
+            step_fb_other = get_rounding_step_smart(row['料飲その他売上'])
+            fb_other = uniform_allocation_by_step(dates, row['料飲その他売上'], step_fb_other)
+            df['料飲その他売上'] = adjust_to_total(fb_other, row['料飲その他売上'], step_fb_other).astype(int)
+        else:
+            df['料飲その他売上'] = 0
 
-        step_other = get_rounding_step_smart(row['その他売上'])
-        other = uniform_allocation_by_step(dates, row['その他売上'], step_other)
-        df['その他売上'] = adjust_to_total(other, row['その他売上'], step_other).astype(int)
+        # --- その他売上の配分 ---
+        if not pd.isna(row['その他売上']) and row['その他売上'] > 0:
+            step_other = get_rounding_step_smart(row['その他売上'])
+            other = uniform_allocation_by_step(dates, row['その他売上'], step_other)
+            df['その他売上'] = adjust_to_total(other, row['その他売上'], step_other).astype(int)
+        else:
+            df['その他売上'] = 0
 
         # metric validation
         max_adr = max_adr_hist
