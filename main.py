@@ -660,6 +660,9 @@ def process(settings: Settings):
             step = step_revenue if m == '宿泊売上' else 1
             df[m] = allocate_from_ratios(dates, daily_ratios.values, row[m], step).values
 
+        step_fb_other = get_rounding_step_smart(row['料飲その他売上'])
+        step_other = get_rounding_step_smart(row['その他売上'])
+
         # ensure no zero allocations for key metrics
         for col, step, total_val in [
             ('宿泊売上', step_revenue, row['宿泊売上']),
