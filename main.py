@@ -668,9 +668,11 @@ def process(settings: Settings):
             ('宿泊売上', step_revenue, row['宿泊売上']),
             ('室数', 1, row['室数']),
             ('人数', 1, row['人数']),
-            ('料飲その他売上', step_fb_other, row['料飲その他売上']),
-            ('その他売上', step_other, row['その他売上']),
+            ('料飲その他売上', step_fb_other, row.get('料飲その他売上', 0)),
+            ('その他売上', step_other, row.get('その他売上', 0)),
         ]:
+            if col not in df.columns:
+                continue
             zeros = df[col] <= 0
             if zeros.any():
                 logging.info('zero allocation adjusted for %s in %d-%02d', col, year, month)
