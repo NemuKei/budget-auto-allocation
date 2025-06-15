@@ -257,53 +257,95 @@ def apply_distribution(dates, ratios, total, step):
     return pd.Series(floor, index=dates)
 
 
+MAX_ITER = 10000
+
+
 def adjust_to_total(series: pd.Series, target: float, step: int):
     if series.isna().any() or np.isinf(series).any():
         raise ValueError('series contains invalid value')
+
     base = series.copy().astype(float)
-    diff = target - base.sum()
-    order = np.argsort(base - np.floor(base/step)*step)[::-1].to_numpy()
+    steps = [step]
+    if step > 100:
+        steps.append(100)
+    if step > 10:
+        steps.append(10)
+    if step > 1:
+        steps.append(1)
+
     rng = np.random.default_rng()
-    rng.shuffle(order)
-    i = 0
-    while abs(diff) >= step/2:
-        idx = series.index[order[i % len(order)]]
-        base[idx] += step if diff > 0 else -step
-        diff += -step if diff > 0 else step
-        i += 1
-        if i % len(order) == 0:
-            rng.shuffle(order)
+    iter_count = 0
+    for s in steps:
+        diff = target - base.sum()
+        if abs(diff) < s / 2:
+            continue
+        order = np.argsort(base - np.floor(base / s) * s)[::-1].to_numpy()
+        rng.shuffle(order)
+        i = 0
+        while abs(diff) >= s / 2 and iter_count < MAX_ITER:
+            idx = series.index[order[i % len(order)]]
+            base[idx] += s if diff > 0 else -s
+            diff += -s if diff > 0 else s
+            i += 1
+            iter_count += 1
+            if i % len(order) == 0:
+                rng.shuffle(order)
+        if iter_count >= MAX_ITER:
+            break
+
+    remaining = target - base.sum()
+    if abs(remaining) >= steps[-1] / 2:
+        base.iloc[-1] += remaining
+
     return base
 
 
 def adjust_to_total_with_cap(series: pd.Series, target: float, step: int, cap: float):
     """Adjust series to match ``target`` respecting a per-day ``cap``."""
     base = series.copy().astype(float).clip(upper=cap)
-    diff = target - base.sum()
-    if abs(diff) < step / 2:
-        return base
+    steps = [step]
+    if step > 100:
+        steps.append(100)
+    if step > 10:
+        steps.append(10)
+    if step > 1:
+        steps.append(1)
 
-    free_mask = base < cap if diff > 0 else base > 0
-    if free_mask.any():
-        total_free = base[free_mask].sum()
-        target_free = target - base[~free_mask].sum()
-        if total_free > 0:
-            scale = target_free / total_free
-            scaled = (base[free_mask] * scale).clip(upper=cap)
-            base[free_mask] = scaled
-            diff = target - base.sum()
+    iter_count = 0
+    for s in steps:
+        diff = target - base.sum()
+        if abs(diff) < s / 2:
+            continue
 
-    idxs = list(base.index[free_mask])
-    i = 0
-    while abs(diff) >= step / 2 and idxs:
-        idx = idxs[i % len(idxs)]
-        if diff > 0 and base[idx] + step <= cap:
-            base[idx] += step
-            diff -= step
-        elif diff < 0 and base[idx] - step >= 0:
-            base[idx] -= step
-            diff += step
-        i += 1
+        free_mask = base < cap if diff > 0 else base > 0
+        if free_mask.any():
+            total_free = base[free_mask].sum()
+            target_free = target - base[~free_mask].sum()
+            if total_free > 0:
+                scale = target_free / total_free
+                scaled = (base[free_mask] * scale).clip(upper=cap)
+                base[free_mask] = scaled
+                diff = target - base.sum()
+
+        idxs = list(base.index[free_mask])
+        i = 0
+        while abs(diff) >= s / 2 and idxs and iter_count < MAX_ITER:
+            idx = idxs[i % len(idxs)]
+            if diff > 0 and base[idx] + s <= cap:
+                base[idx] += s
+                diff -= s
+            elif diff < 0 and base[idx] - s >= 0:
+                base[idx] -= s
+                diff += s
+            i += 1
+            iter_count += 1
+        if iter_count >= MAX_ITER:
+            break
+
+    remaining = target - base.sum()
+    if abs(remaining) >= steps[-1] / 2:
+        base.iloc[-1] = min(cap, max(0, base.iloc[-1] + remaining))
+
     return base
 
 
@@ -623,6 +665,8 @@ def process(settings: Settings):
             ('宿泊売上', step_revenue, row['宿泊売上']),
             ('室数', 1, row['室数']),
             ('人数', 1, row['人数']),
+            ('料飲その他売上', step_fb_other, row['料飲その他売上']),
+            ('その他売上', step_other, row['その他売上']),
         ]:
             zeros = df[col] <= 0
             if zeros.any():
@@ -691,10 +735,11 @@ def process(settings: Settings):
 
         step_fb_other = get_rounding_step_smart(row['料飲その他売上'])
         fb_other = uniform_allocation_by_step(dates, row['料飲その他売上'], step_fb_other)
+        df['料飲その他売上'] = adjust_to_total(fb_other, row['料飲その他売上'], step_fb_other).astype(int)
+
         step_other = get_rounding_step_smart(row['その他売上'])
         other = uniform_allocation_by_step(dates, row['その他売上'], step_other)
-        df['料飲その他売上'] = fb_other.values
-        df['その他売上'] = other.values
+        df['その他売上'] = adjust_to_total(other, row['その他売上'], step_other).astype(int)
 
         # metric validation
         max_adr = max_adr_hist
@@ -733,6 +778,8 @@ def process(settings: Settings):
             ('宿泊売上', step_revenue, row['宿泊売上']),
             ('室数', 1, row['室数']),
             ('人数', 1, row['人数']),
+            ('料飲その他売上', step_fb_other, row['料飲その他売上']),
+            ('その他売上', step_other, row['その他売上']),
         ]:
             if col == '人数':
                 df[col] = adjust_to_total_with_cap(df[col], total_val, step, guest_upper).round().astype(int)
@@ -740,7 +787,7 @@ def process(settings: Settings):
                 df[col] = adjust_to_total_with_cap(df[col], total_val, step, room_upper_bound)
                 df[col] = adjust_to_total(df[col], total_val, step).round().astype(int)
             else:
-                df[col] = adjust_to_total(df[col], total_val, step)
+                df[col] = adjust_to_total(df[col], total_val, step).astype(int)
 
         # occupancy cap handling
         cap_val = min(room_upper_bound, settings.capacity)
