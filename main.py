@@ -25,6 +25,8 @@ class Settings:
     weight_prev_year: float
     weight_2_3m: float
     weight_recent: float
+    dor_min: float = 1.0
+    dor_max: float = 2.5
 
 def load_settings() -> Settings:
     cp = configparser.ConfigParser()
@@ -38,6 +40,8 @@ def load_settings() -> Settings:
         weight_prev_year=float(s.get('weight_prev_year', 0.7)),
         weight_2_3m=float(s.get('weight_2_3m', 0.1)),
         weight_recent=float(s.get('weight_recent', 0.2)),
+        dor_min=float(s.get('dor_min', 1.0)),
+        dor_max=float(s.get('dor_max', 2.5)),
     )
 
 
@@ -50,6 +54,8 @@ def save_settings(settings: Settings):
         'weight_prev_year': settings.weight_prev_year,
         'weight_2_3m': settings.weight_2_3m,
         'weight_recent': settings.weight_recent,
+        'dor_min': settings.dor_min,
+        'dor_max': settings.dor_max,
     }
     with CONFIG_FILE.open('w') as f:
         cp.write(f)
@@ -773,11 +779,11 @@ def process(settings: Settings):
             if adr > max_adr * 1.1:
                 df.at[idx, '宿泊売上'] = rooms * max_adr * 1.1
                 logging.warning('ADR clipped on %s', r['date'])
-            if dor > 2.5:
-                df.at[idx, '人数'] = rooms * 2.5
+            if settings.dor_max > 0 and dor > settings.dor_max:
+                df.at[idx, '人数'] = rooms * settings.dor_max
                 logging.warning('DOR high on %s', r['date'])
-            if dor < 1.0 and r['人数'] > 0:
-                df.at[idx, '人数'] = rooms * 1.0
+            if settings.dor_min > 0 and dor < settings.dor_min and r['人数'] > 0:
+                df.at[idx, '人数'] = rooms * settings.dor_min
                 logging.warning('DOR low on %s', r['date'])
             if revpar > max_revpar * 1.1:
                 df.at[idx, '宿泊売上'] = settings.capacity * max_revpar * 1.1
@@ -908,6 +914,16 @@ def run_gui():
     w3_var = tk.DoubleVar(value=settings.weight_recent)
     tk.Entry(root, textvariable=w3_var).grid(row=5, column=1)
 
+    tk.Label(root, text='DOR下限').grid(row=6, column=0)
+    dor_min_var = tk.DoubleVar(value=settings.dor_min)
+    tk.Entry(root, textvariable=dor_min_var).grid(row=6, column=1)
+
+    tk.Label(root, text='DOR上限').grid(row=7, column=0)
+    dor_max_var = tk.DoubleVar(value=settings.dor_max if settings.dor_max > 0 else 0.0)
+    tk.Entry(root, textvariable=dor_max_var).grid(row=7, column=1)
+    dor_max_none_var = tk.BooleanVar(value=settings.dor_max <= 0)
+    tk.Checkbutton(root, text='DOR上限なし', variable=dor_max_none_var).grid(row=7, column=2)
+
     def on_run():
         s = Settings(
             fiscal_year=fiscal_var.get(),
@@ -916,6 +932,8 @@ def run_gui():
             weight_prev_year=w1_var.get(),
             weight_2_3m=w2_var.get(),
             weight_recent=w3_var.get(),
+            dor_min=dor_min_var.get(),
+            dor_max=0.0 if dor_max_none_var.get() else dor_max_var.get(),
         )
         save_settings(s)
         try:
@@ -925,7 +943,7 @@ def run_gui():
             logging.exception('error during process')
             messagebox.showerror('エラー', str(e))
 
-    tk.Button(root, text='実行', command=on_run).grid(row=6, column=0, columnspan=2)
+    tk.Button(root, text='実行', command=on_run).grid(row=8, column=0, columnspan=3)
     root.mainloop()
 
 if __name__ == '__main__':
